@@ -1,0 +1,10 @@
+.venv/
+.venv-gpu/
+__pycache__/
+*.py[cod]
+build/
+dist/
+release/
+instance.json
+config.json
+data/

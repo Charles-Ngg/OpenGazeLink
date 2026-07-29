@@ -1,0 +1,12 @@
+OpenGazeLink
+Copyright 2026 OpenGazeLink contributors
+
+This product includes software and models developed by third parties:
+
+- Google MediaPipe and the Face Landmarker task model, Apache License 2.0
+- OpenCV, Apache License 2.0
+- NumPy, BSD 3-Clause License
+- PyTorch, BSD 3-Clause License
+- AndroidX and Kotlin, Apache License 2.0
+
+Third-party names and trademarks are the property of their respective owners.

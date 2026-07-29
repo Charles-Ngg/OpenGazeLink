@@ -1,0 +1,40 @@
+# Python environments and caches
+**/.venv/
+**/.venv-*/
+**/venv/
+**/__pycache__/
+*.py[cod]
+
+# JavaScript dependencies
+**/node_modules/
+
+# Android local/build output
+**/.gradle/
+**/.kotlin/
+**/.idea/
+**/local.properties
+**/app/build/
+*.iml
+*.apk
+*.aab
+
+# PC build and release output
+pc-provider/build/
+pc-provider/dist/
+pc-provider/release/
+pc-provider/models/candidates/
+
+# Local configuration, calibration frames, trained models, and logs
+pc-provider/config.json
+pc-provider/instance.json
+pc-provider/data/
+
+# General generated files
+*.log
+*.tmp
+Thumbs.db
+.DS_Store
+
+# Keep internal design notes local; publish only the root project README.
+*.md
+!/README.md
