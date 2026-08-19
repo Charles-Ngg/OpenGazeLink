@@ -6,7 +6,9 @@ import time
 import cv2
 import numpy as np
 
-from .camera import UdpYuvCamera, UdpYuvConfig
+from .camera import (
+    UdpYuvCamera, UdpYuvConfig, WindowsCamera, WindowsCameraConfig,
+)
 from .config import ProviderConfig
 from .extrapolation import FixedHorizonExtrapolator2D
 from .model_registry import ModelRegistry
@@ -55,10 +57,21 @@ class EyeTrackingEngine:
         )
 
     @property
-    def camera(self) -> UdpYuvCamera:
+    def camera(self):
         return self._camera
 
-    def _open_camera(self) -> UdpYuvCamera:
+    def _open_camera(self):
+        if self.config.input_source == "windows_camera":
+            return WindowsCamera(WindowsCameraConfig(
+                device_index=self.config.windows_camera_index,
+                width=self.config.windows_camera_width,
+                height=self.config.windows_camera_height,
+                fps=self.config.windows_camera_fps,
+                backend=self.config.windows_camera_backend,
+                fov_x_degrees=self.config.windows_camera_fov_x_degrees,
+                rotate=self.config.rotate,
+                mirror=self.config.mirror,
+            ))
         return UdpYuvCamera(UdpYuvConfig(
             bind=self.config.udp_bind,
             port=self.config.udp_port,
@@ -70,10 +83,20 @@ class EyeTrackingEngine:
         was_tracking = self.is_tracking()
         self.stop_tracking()
         old_camera_key = (
+            self.config.input_source,
             self.config.udp_bind, self.config.udp_port,
             self.config.rotate, self.config.mirror,
+            self.config.windows_camera_index, self.config.windows_camera_width,
+            self.config.windows_camera_height, self.config.windows_camera_fps,
+            self.config.windows_camera_backend, self.config.windows_camera_fov_x_degrees,
         )
-        new_camera_key = (config.udp_bind, config.udp_port, config.rotate, config.mirror)
+        new_camera_key = (
+            config.input_source,
+            config.udp_bind, config.udp_port, config.rotate, config.mirror,
+            config.windows_camera_index, config.windows_camera_width,
+            config.windows_camera_height, config.windows_camera_fps,
+            config.windows_camera_backend, config.windows_camera_fov_x_degrees,
+        )
         self.config = config
         self._gaze_filter.configure(
             config.one_euro_min_cutoff,
@@ -92,7 +115,11 @@ class EyeTrackingEngine:
             self._motion_diagnostic_metadata(config),
         )
         if was_tracking:
-            self.start_tracking()
+            try:
+                self.start_tracking()
+            except Exception as error:
+                with self._lock:
+                    self._last_error = str(error)
 
     def is_tracking(self) -> bool:
         return self._tracking_thread is not None and self._tracking_thread.is_alive()
@@ -130,6 +157,32 @@ class EyeTrackingEngine:
                 f"model uses {screen.get('width')}x{screen.get('height')}"
             )
         model_payload = model.metadata
+        model_input_source = model_payload.get("input_source", "phone_udp")
+        if model_input_source != self.config.input_source:
+            raise ValueError(
+                f"model was calibrated for {model_input_source}, "
+                f"but current input source is {self.config.input_source}; recalibrate"
+            )
+        if self.config.input_source == "windows_camera":
+            model_camera = model_payload.get("windows_camera") or {}
+            current_camera = {
+                "device_index": self.config.windows_camera_index,
+                "width": self.config.windows_camera_width,
+                "height": self.config.windows_camera_height,
+                "fov_x_degrees": self.config.windows_camera_fov_x_degrees,
+                "rotate": self.config.rotate,
+                "mirror": self.config.mirror,
+            }
+            for key, value in current_camera.items():
+                model_value = model_camera.get(key)
+                if isinstance(value, float):
+                    matches = model_value is not None and abs(float(model_value) - value) <= 0.01
+                else:
+                    matches = model_value == value
+                if not matches:
+                    raise ValueError(
+                        "Windows camera configuration differs from calibration; recalibrate"
+                    )
         configured_screen_origin = tuple(float(value) for value in screen_camera_origin(
             self.config.screen_width,
             self.config.screen_height,
@@ -407,6 +460,13 @@ class EyeTrackingEngine:
 
     def input_status(self) -> dict:
         mode = self._camera.reported_mode()
+        if self.config.input_source == "windows_camera" and (
+            int(mode.get("width") or 0) <= 0 or int(mode.get("height") or 0) <= 0
+        ):
+            return {
+                "ready": False,
+                "error": mode.get("error") or "Windows camera frame is unavailable",
+            }
         if int(mode.get("width") or 0) <= 0 or int(mode.get("height") or 0) <= 0:
             return {"ready": False, "error": "未收到手机画面"}
         camera_model = self._camera.camera_model()

@@ -67,10 +67,17 @@ function configPayload() {
   if (!state || !landmarker) throw new Error("配置尚未加载完成");
   return {
     landmarker: landmarker.value,
+    input_source: $("inputSource").value,
     lighting_profile: $("lightingProfile").value,
     udp_port: numericInput("udpPort", "UDP端口"),
     rotate: $("rotate").value,
     mirror: $("mirror").checked,
+    windows_camera_index: Number($("windowsCameraIndex").value),
+    windows_camera_width: numericInput("windowsCameraWidth", "PC摄像头宽度"),
+    windows_camera_height: numericInput("windowsCameraHeight", "PC摄像头高度"),
+    windows_camera_fps: numericInput("windowsCameraFps", "PC摄像头 FPS"),
+    windows_camera_backend: $("windowsCameraBackend").value,
+    windows_camera_fov_x_degrees: numericInput("windowsCameraFov", "PC摄像头水平视场角"),
     screen_width: numericInput("screenWidth", "屏幕宽度"),
     screen_height: numericInput("screenHeight", "屏幕高度"),
     screen_diagonal_inches: numericInput("screenDiagonal", "屏幕尺寸"),
@@ -95,9 +102,16 @@ function configPayload() {
 function applyConfig(config) {
   document.querySelector(`input[name="landmarker"][value="${config.landmarker}"]`).checked = true;
   $("lightingProfile").value = config.lighting_profile || "reference";
+  $("inputSource").value = config.input_source || "phone_udp";
   $("udpPort").value = config.udp_port;
   $("rotate").value = config.rotate;
   $("mirror").checked = config.mirror;
+  $("windowsCameraIndex").value = config.windows_camera_index ?? 0;
+  $("windowsCameraWidth").value = config.windows_camera_width ?? 640;
+  $("windowsCameraHeight").value = config.windows_camera_height ?? 480;
+  $("windowsCameraFps").value = config.windows_camera_fps ?? 30;
+  $("windowsCameraBackend").value = config.windows_camera_backend || "auto";
+  $("windowsCameraFov").value = config.windows_camera_fov_x_degrees ?? 60;
   $("screenWidth").value = config.screen_width;
   $("screenHeight").value = config.screen_height;
   $("screenDiagonal").value = config.screen_diagonal_inches;
@@ -268,7 +282,11 @@ function renderPairing(application = {}) {
   $("forgetPairingButton").disabled = !paired || actionBusy;
 }
 
-function renderFirstRun({ paired, cameraReady, intrinsicsReady, geometryReady, modelReady }) {
+function renderFirstRun({ paired, cameraReady, intrinsicsReady, geometryReady, modelReady, inputSource }) {
+  const localCamera = inputSource === "windows_camera";
+  $("pairingPanel").hidden = localCamera;
+  $("setupPairing").querySelector("strong").textContent = localCamera ? "1. PC 摄像头" : "1. 手机连接";
+  $("setupCamera").querySelector("strong").textContent = localCamera ? "2. 画面输入" : "2. 画面与内参";
   const update = (id, ready, readyText, missingText) => {
     const element = $(id);
     element.classList.toggle("ready", ready);
@@ -279,6 +297,10 @@ function renderFirstRun({ paired, cameraReady, intrinsicsReady, geometryReady, m
   update("setupCamera", cameraReady && intrinsicsReady, "画面与 Camera2 内参有效", "在手机端开始传输");
   update("setupGeometry", geometryReady, "屏幕几何已保存", "填写屏幕尺寸与相机位置并保存");
   update("setupModel", modelReady, "所选模型可运行", "完成首次完整校准");
+  if (localCamera) {
+    update("setupPairing", true, "PC 摄像头已选择", "选择 PC 摄像头");
+    update("setupCamera", cameraReady && intrinsicsReady, "PC 摄像头画面有效", "等待 PC 摄像头画面");
+  }
   $("firstRunPanel").hidden = cameraReady && intrinsicsReady && geometryReady && modelReady;
 }
 
@@ -300,7 +322,9 @@ function renderStatus(payload) {
   const modelKey = `${payload.config.landmarker}_cnn`;
   const selectedModel = payload.artifacts?.models?.[modelKey] || {};
   const modelReady = selectedModel.ready && selectedModel.compatible !== false;
-  const intrinsicsReady = intrinsics.source && intrinsics.source !== "estimated_frame_center";
+  const intrinsicsReady = payload.config.input_source === "windows_camera"
+    ? cameraReady && intrinsics.source === "estimated_windows_camera"
+    : Boolean(intrinsics.source && intrinsics.source !== "estimated_frame_center");
   const calibrationState = payload.calibration || {};
   const motionDiagnostics = engine.motion_diagnostics || {};
   const availableLightingProfiles = selectedModel.lighting_profiles?.length
@@ -311,9 +335,12 @@ function renderStatus(payload) {
   );
   const startError = input.error || (modelReady ? "" : "所选模型文件缺失或不兼容");
   $("cameraDot").className = `status-dot ${cameraReady ? "ok" : "warn"}`;
-  $("cameraSummary").textContent = cameraReady ? `${camera.width}x${camera.height} · ${Number(camera.fps || 0).toFixed(1)} FPS` : "等待手机";
+  const cameraLabel = payload.config.input_source === "windows_camera" ? "PC 摄像头" : "手机";
+  $("cameraSummary").textContent = cameraReady ? `${cameraLabel} ${camera.width}x${camera.height} · ${Number(camera.fps || 0).toFixed(1)} FPS` : `等待${cameraLabel}`;
   if (cameraReady) {
-    $("cameraSummary").textContent += ` · queue ${Number(camera.transportQueueMs || 0).toFixed(1)} ms · decode ${Number(camera.decodeMs || 0).toFixed(1)} ms`;
+    $("cameraSummary").textContent += payload.config.input_source === "windows_camera"
+      ? ` · 覆盖旧帧 ${Number(camera.overwrittenFrames || 0)}`
+      : ` · queue ${Number(camera.transportQueueMs || 0).toFixed(1)} ms · decode ${Number(camera.decodeMs || 0).toFixed(1)} ms`;
   }
   $("frameRate").textContent = activePage === "control"
     ? `${Number(camera.fps || 0).toFixed(1)} FPS 连续流`
@@ -346,6 +373,7 @@ function renderStatus(payload) {
   renderFirstRun({
     paired: Boolean(payload.application?.pairing?.paired_phone_id),
     cameraReady, intrinsicsReady, geometryReady, modelReady,
+    inputSource: payload.config.input_source,
   });
   $("saveConfigButton").disabled = !configDirty;
   renderConfigApplyStatus();
@@ -406,6 +434,24 @@ async function refreshStatus() {
   finally {
     statusRequestPending = false;
     scheduleStatusRefresh();
+  }
+}
+
+async function refreshWindowsCameras() {
+  const button = $("refreshWindowsCamerasButton");
+  button.disabled = true;
+  try {
+    const payload = await request("/api/windows-cameras");
+    const select = $("windowsCameraIndex");
+    const selected = String(select.value || state?.config?.windows_camera_index || 0);
+    const cameras = payload.cameras || [];
+    select.innerHTML = cameras.length
+      ? cameras.map((camera) => `<option value="${Number(camera.index)}">${escapeHtml(camera.name || `Windows camera ${camera.index}`)} (${Number(camera.width || 0)}x${Number(camera.height || 0)})</option>`).join("")
+      : `<option value="${selected}">未发现摄像头（设备 ${selected}）</option>`;
+    select.value = Array.from(select.options).some((option) => option.value === selected)
+      ? selected : String(cameras[0]?.index ?? selected);
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -879,6 +925,26 @@ $("saveConfigButton").addEventListener("click", async () => {
     toast("配置已保存并立即应用");
     await refreshStatus();
   } catch (error) { toast(error.message); }
+});
+$("refreshWindowsCamerasButton").addEventListener("click", () => {
+  refreshWindowsCameras().catch((error) => toast(error.message));
+});
+$("applyWindowsCameraButton").addEventListener("click", async () => {
+  const button = $("applyWindowsCameraButton");
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "正在打开摄像头...";
+  try {
+    await post("/api/config", configPayload());
+    configDirty = false;
+    toast("摄像头设置已保存并应用");
+    await refreshStatus();
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
 });
 $("startButton").addEventListener("click", async () => {
   try {

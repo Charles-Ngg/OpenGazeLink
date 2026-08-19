@@ -7,6 +7,8 @@
   letter-spacing: 0;
 }
 
+[hidden] { display: none !important; }
+
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; background: #101311; }
 button, input, select { font: inherit; letter-spacing: 0; }

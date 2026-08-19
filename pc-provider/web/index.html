@@ -9,7 +9,7 @@
 <body>
   <header class="topbar">
     <div class="brand">OpenGazeLink</div>
-    <div class="top-status"><span id="cameraDot" class="status-dot"></span><span id="cameraSummary">等待手机</span></div>
+    <div class="top-status"><span id="cameraDot" class="status-dot"></span><span id="cameraSummary">等待相机输入</span></div>
     <div class="top-status"><span id="runtimeDot" class="status-dot"></span><span id="runtimeSummary">未运行</span></div>
   </header>
 
@@ -44,8 +44,8 @@
 
         <div class="dashboard-grid">
           <section class="panel camera-panel">
-            <div class="panel-heading"><h2>手机画面</h2><span id="frameRate">- FPS</span></div>
-            <div id="cameraStage" class="camera-stage"><span id="cameraPlaceholder">等待手机画面</span><img id="cameraFrame" alt="手机摄像头画面" hidden></div>
+            <div class="panel-heading"><h2>相机画面</h2><span id="frameRate">- FPS</span></div>
+            <div id="cameraStage" class="camera-stage"><span id="cameraPlaceholder">等待相机画面</span><img id="cameraFrame" alt="相机画面" hidden></div>
           </section>
 
           <section class="panel">
@@ -76,10 +76,31 @@
                 <div class="config-fields">
                   <label>UDP 端口<input id="udpPort" type="number" min="1" max="65535"></label>
                   <label>画面旋转
-                    <select id="rotate"><option value="auto">跟随手机</option><option>0</option><option>90</option><option>180</option><option>270</option></select>
+                    <select id="rotate"><option value="auto">自动（PC 为 0°）</option><option>0</option><option>90</option><option>180</option><option>270</option></select>
                   </label>
                   <label>共享内存名称<input id="sharedMemory" type="text"></label>
-                  <label class="check-row"><input id="mirror" type="checkbox"><span>镜像手机画面</span></label>
+                  <label class="check-row"><input id="mirror" type="checkbox"><span>镜像输入画面</span></label>
+                </div>
+              </section>
+
+              <section class="config-section">
+                <div class="config-section-heading"><h3>PC 摄像头</h3><span>与手机二选一。采集在线程中持续运行，不受网页是否在前台的影响。</span></div>
+                <div class="config-fields">
+                  <label>输入源
+                    <select id="inputSource"><option value="phone_udp">手机 UDP</option><option value="windows_camera">Windows PC 摄像头</option></select>
+                  </label>
+                  <label>设备
+                    <select id="windowsCameraIndex"><option value="0">Windows camera 0</option></select>
+                  </label>
+                  <label>视频宽度<input id="windowsCameraWidth" type="number" min="320" max="4096" step="1"></label>
+                  <label>视频高度<input id="windowsCameraHeight" type="number" min="240" max="4096" step="1"></label>
+                  <label>目标 FPS<input id="windowsCameraFps" type="number" min="1" max="120" step="1"></label>
+                  <label>Windows 后端
+                    <select id="windowsCameraBackend"><option value="auto">Auto</option><option value="dshow">DirectShow</option><option value="msmf">Media Foundation</option></select>
+                  </label>
+                  <label>水平视场角（度）<input id="windowsCameraFov" type="number" min="20" max="140" step="0.1"><small>PC 摄像头暂无 Camera2 内参，使用此值估算；更换设备或分辨率后应重新校准。</small></label>
+                  <button id="refreshWindowsCamerasButton" class="button secondary" type="button">刷新设备</button>
+                  <button id="applyWindowsCameraButton" class="button primary" type="button">应用摄像头设置</button>
                 </div>
               </section>
 
@@ -130,7 +151,7 @@
           </section>
         </div>
 
-        <section class="panel status-panel">
+        <section id="pairingPanel" class="panel status-panel">
           <div class="panel-heading"><h2>手机配对</h2><span id="pairingSummary">等待发现</span></div>
           <p id="pairingDetail">在手机端点击“发现电脑”，首次连接需要在这里确认。</p>
           <div id="pairingCandidates" class="profile-items"></div>

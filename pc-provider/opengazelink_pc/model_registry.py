@@ -93,6 +93,8 @@ class ModelRegistry:
                         "screen_diagonal_inches": payload.get("screen_diagonal_inches"),
                         "camera_position_screen_cm": payload.get("camera_position_screen_cm"),
                         "screen_camera_origin_cm": payload.get("screen_camera_origin_cm"),
+                        "input_source": payload.get("input_source", "phone_udp"),
+                        "windows_camera": payload.get("windows_camera"),
                         "training_error_deg": diagnostics.get("training_error_deg"),
                         "holdout": diagnostics.get("comparison_holdout"),
                         "lighting_profiles": sorted((payload.get("lighting_profiles") or {}).keys()),
@@ -134,6 +136,8 @@ class ModelRegistry:
                         "screen": payload.get("screen"),
                         "screen_diagonal_inches": payload.get("screen_diagonal_inches"),
                         "screen_camera_origin_cm": payload.get("screen_camera_origin_cm"),
+                        "input_source": payload.get("input_source", "phone_udp"),
+                        "windows_camera": payload.get("windows_camera"),
                         "lighting_profile_samples": lighting_profile_samples,
                     })
                 except Exception as error:

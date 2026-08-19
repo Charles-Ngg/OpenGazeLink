@@ -18,6 +18,7 @@ from .calibration_session import (
     retrain_lighting_profiles,
 )
 from .config import DEFAULT_CONFIG_PATH, ProviderConfig, save_config
+from .camera import enumerate_windows_cameras
 from .engine import EyeTrackingEngine
 from .model_registry import ModelRegistry
 from .normalized_eye import screen_camera_origin
@@ -25,6 +26,20 @@ from .paths import WEB_DIR
 
 
 def _geometry_matches_dataset_status(dataset: dict, config: ProviderConfig) -> bool:
+    if dataset.get("input_source", "phone_udp") != config.input_source:
+        return False
+    if config.input_source == "windows_camera":
+        camera = dataset.get("windows_camera") or {}
+        if (
+            camera.get("device_index") != config.windows_camera_index
+            or camera.get("width") != config.windows_camera_width
+            or camera.get("height") != config.windows_camera_height
+            or camera.get("rotate") != config.rotate
+            or camera.get("mirror") != config.mirror
+            or camera.get("fov_x_degrees") is None
+            or abs(float(camera["fov_x_degrees"]) - config.windows_camera_fov_x_degrees) > 0.01
+        ):
+            return False
     if dataset.get("screen") != {
         "width": config.screen_width, "height": config.screen_height,
     }:
@@ -155,9 +170,30 @@ class ControlApplication:
                 self.config.geometry_configured
                 and origin_matches and screen_matches and diagonal_matches
             )
+            input_source_compatible = item.get("input_source", "phone_udp") == self.config.input_source
+            if input_source_compatible and self.config.input_source == "windows_camera":
+                calibrated_camera = item.get("windows_camera") or {}
+                current_camera = {
+                    "device_index": self.config.windows_camera_index,
+                    "width": self.config.windows_camera_width,
+                    "height": self.config.windows_camera_height,
+                    "fov_x_degrees": self.config.windows_camera_fov_x_degrees,
+                    "rotate": self.config.rotate,
+                    "mirror": self.config.mirror,
+                }
+                input_source_compatible = all(
+                    abs(float(calibrated_camera.get(key)) - value) <= 0.01
+                    if isinstance(value, float) and calibrated_camera.get(key) is not None
+                    else calibrated_camera.get(key) == value
+                    for key, value in current_camera.items()
+                )
             item["geometry_compatible"] = geometry_compatible
+            item["input_source_compatible"] = input_source_compatible
             if item.get("ready"):
-                item["compatible"] = bool(item.get("compatible", True) and geometry_compatible)
+                item["compatible"] = bool(
+                    item.get("compatible", True)
+                    and geometry_compatible and input_source_compatible
+                )
         result = {
             "calibration_schema": CALIBRATION_SCHEMA,
             "config": asdict(self.config),
@@ -175,6 +211,22 @@ class ControlApplication:
         if self._host_status is not None:
             result["application"] = self._host_status()
         return result
+
+    def windows_cameras(self) -> list[dict]:
+        cameras = enumerate_windows_cameras()
+        mode = self.engine.camera.reported_mode()
+        if mode.get("source") == "windows_camera":
+            current_index = int(mode.get("deviceIndex", self.config.windows_camera_index))
+            if not any(int(item.get("index", -1)) == current_index for item in cameras):
+                cameras.insert(0, {
+                    "index": current_index,
+                    "name": f"Windows camera {current_index} (active)",
+                    "width": int(mode.get("width") or 0),
+                    "height": int(mode.get("height") or 0),
+                    "fps": float(mode.get("fps") or 0.0),
+                    "backend": str(mode.get("backend") or self.config.windows_camera_backend),
+                })
+        return cameras
 
     def update_config(self, values: dict) -> dict:
         with self._lock:
@@ -387,6 +439,9 @@ def _handler(application: ControlApplication):
             path = self.path.split("?", 1)[0]
             if path == "/api/status":
                 self._json(application.status())
+                return
+            if path == "/api/windows-cameras":
+                self._json({"cameras": application.windows_cameras()})
                 return
             if path == "/api/gaze":
                 self._json(application.engine.latest_gaze())

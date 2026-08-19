@@ -35,14 +35,25 @@ class ApplicationHost:
             shutdown_application=self.request_shutdown,
         )
         if self.config.paired_phone_id:
-            self.engine.camera.set_allowed_source_ip("0.0.0.0")
+            self._set_allowed_source_ip("0.0.0.0")
         self.pairing = PairingService(
             self.config.udp_bind,
             self.config.discovery_port,
             lambda: self.application.config.udp_port,
             self._paired_phone,
-            self.engine.camera.set_allowed_source_ip,
+            self._set_allowed_source_ip,
         )
+
+    def _set_allowed_source_ip(self, address: str | None) -> None:
+        setter = getattr(self.engine.camera, "set_allowed_source_ip", None)
+        if setter is not None:
+            setter(address)
+
+    def _camera_source_status(self) -> dict:
+        getter = getattr(self.engine.camera, "source_status", None)
+        return getter() if getter is not None else {
+            "last_source_ip": "", "allowed_source_ip": "",
+        }
 
     def status(self) -> dict:
         with self._lock:
@@ -53,7 +64,7 @@ class ApplicationHost:
             }
             if self.pairing is not None:
                 result["pairing"] = self.pairing.status()
-            result["phone_source"] = self.engine.camera.source_status()
+            result["phone_source"] = self._camera_source_status()
             return result
 
     def _paired_phone(self) -> tuple[str, str]:
@@ -63,10 +74,10 @@ class ApplicationHost:
     def _config_updated(self, config) -> None:
         self.config = config
         if not config.paired_phone_id:
-            self.engine.camera.set_allowed_source_ip(None)
+            self._set_allowed_source_ip(None)
             return
         pending = self.pairing.pending_phone(config.paired_phone_id) if self.pairing else None
-        self.engine.camera.set_allowed_source_ip(pending.address if pending else "0.0.0.0")
+        self._set_allowed_source_ip(pending.address if pending else "0.0.0.0")
 
     def accept_pairing(self, phone_id: str) -> dict:
         pairing = self.pairing
@@ -80,7 +91,7 @@ class ApplicationHost:
             "paired_phone_name": pending.name,
         })
         self.config = self.application.config
-        self.engine.camera.set_allowed_source_ip(pending.address)
+        self._set_allowed_source_ip(pending.address)
         return pairing.status()
 
     def forget_pairing(self) -> dict:
@@ -89,7 +100,7 @@ class ApplicationHost:
             "paired_phone_name": "",
         })
         self.config = self.application.config
-        self.engine.camera.set_allowed_source_ip(None)
+        self._set_allowed_source_ip(None)
         return self.pairing.status() if self.pairing is not None else {}
 
     def open_control(self, open_browser: bool = True) -> str:

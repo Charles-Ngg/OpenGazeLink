@@ -509,3 +509,302 @@ class UdpYuvCamera:
             pass
         self._thread.join(timeout=1.0)
         self._decode_thread.join(timeout=1.0)
+
+
+@dataclass
+class WindowsCameraConfig:
+    device_index: int = 0
+    width: int = 640
+    height: int = 480
+    fps: int = 30
+    backend: str = "auto"
+    fov_x_degrees: float = 60.0
+    rotate: str | int = "auto"
+    mirror: bool = False
+    frame_stale_after_s: float = 0.75
+
+
+def _windows_capture_backend(name: str) -> int:
+    normalized = str(name or "auto").lower()
+    if normalized == "dshow":
+        return int(getattr(cv2, "CAP_DSHOW", 700))
+    if normalized in ("msmf", "media_foundation"):
+        return int(getattr(cv2, "CAP_MSMF", 1400))
+    return int(getattr(cv2, "CAP_ANY", 0))
+
+
+def enumerate_windows_cameras(max_devices: int = 10) -> list[dict]:
+    """Probe camera indices on demand; this is never called by the capture thread."""
+    results: list[dict] = []
+    for index in range(max(0, int(max_devices))):
+        for backend_name in ("dshow", "msmf", "any"):
+            capture = None
+            try:
+                capture = cv2.VideoCapture(index, _windows_capture_backend(backend_name))
+                if not capture.isOpened():
+                    continue
+                width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+                height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+                fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+                results.append({
+                    "index": index,
+                    "name": f"Windows camera {index}",
+                    "width": width,
+                    "height": height,
+                    "fps": fps,
+                    "backend": backend_name,
+                })
+                break
+            finally:
+                if capture is not None:
+                    capture.release()
+    return results
+
+
+class WindowsCamera:
+    """Latest-only OpenCV capture for a local Windows camera.
+
+    The capture loop is deliberately independent of HTTP preview visibility. A
+    slow inference or browser consumer can only cause frame replacement, never
+    an unbounded queue and never a growing end-to-end delay.
+    """
+
+    def __init__(self, config: WindowsCameraConfig) -> None:
+        self.config = config
+        self._lock = threading.Lock()
+        self._frame_condition = threading.Condition(self._lock)
+        self._stop = threading.Event()
+        self._latest_frame: np.ndarray | None = None
+        self._latest_t_ms = 0.0
+        self._latest_seq = 0
+        self._last_delivered_seq = -1
+        self._latest_frame_timings: dict[int, dict] = {}
+        self._last_frame_at = 0.0
+        self._last_error = ""
+        self._raw_width = 0
+        self._raw_height = 0
+        self._times: list[float] = []
+        self._capture = None
+        self._backend_name = ""
+        self._captured_frames = 0
+        self._overwritten_frames = 0
+        self._read_failures = 0
+        self._camera_model: dict = {}
+        self._open_capture()
+        self._thread = threading.Thread(
+            target=self._capture_loop, name="windows-camera", daemon=True,
+        )
+        self._thread.start()
+
+    def _backend_candidates(self) -> list[tuple[str, int]]:
+        requested = str(self.config.backend or "auto").lower()
+        if requested == "auto":
+            return [
+                ("dshow", _windows_capture_backend("dshow")),
+                ("msmf", _windows_capture_backend("msmf")),
+                ("any", _windows_capture_backend("any")),
+            ]
+        return [(requested, _windows_capture_backend(requested))]
+
+    def _open_capture(self) -> None:
+        errors = []
+        for name, backend in self._backend_candidates():
+            capture = None
+            try:
+                capture = cv2.VideoCapture(int(self.config.device_index), backend)
+                if not capture.isOpened():
+                    errors.append(f"{name}: device unavailable")
+                    if capture is not None:
+                        capture.release()
+                    continue
+                # These are hints. Drivers may reject one or more values.
+                capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                capture.set(cv2.CAP_PROP_FRAME_WIDTH, int(self.config.width))
+                capture.set(cv2.CAP_PROP_FRAME_HEIGHT, int(self.config.height))
+                capture.set(cv2.CAP_PROP_FPS, int(self.config.fps))
+                self._capture = capture
+                self._backend_name = name
+                return
+            except Exception as error:
+                errors.append(f"{name}: {error}")
+                if capture is not None:
+                    capture.release()
+        with self._lock:
+            self._last_error = (
+                f"Windows camera {self.config.device_index} could not be opened"
+                + (f" ({'; '.join(errors)})" if errors else "")
+            )
+
+    def read_latest(self, after_seq: int = -1, timeout_s: float = 0.25):
+        deadline = time.monotonic() + timeout_s
+        with self._frame_condition:
+            while True:
+                now = time.monotonic()
+                live = (
+                    self._latest_frame is not None
+                    and now - self._last_frame_at <= self.config.frame_stale_after_s
+                )
+                if live and self._latest_seq != after_seq:
+                    sequence = self._latest_seq
+                    self._last_delivered_seq = sequence
+                    return True, self._latest_frame.copy(), self._latest_t_ms, sequence
+                remaining = deadline - now
+                if self._stop.is_set() or remaining <= 0.0:
+                    return False, None, 0.0, after_seq
+                self._frame_condition.wait(remaining)
+
+    def latest_frame_timing(self, sequence: int | None = None) -> dict:
+        with self._lock:
+            requested = self._latest_seq if sequence is None else sequence
+            return dict(self._latest_frame_timings.get(requested) or {})
+
+    def _effective_rotation(self) -> int:
+        configured = str(self.config.rotate).lower()
+        if configured == "auto":
+            return 0
+        try:
+            rotation = int(configured) % 360
+        except ValueError:
+            return 0
+        return rotation if rotation in (0, 90, 180, 270) else 0
+
+    def _preprocess(self, frame: np.ndarray) -> np.ndarray:
+        rotation = self._effective_rotation()
+        if rotation == 90:
+            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+        elif rotation == 180:
+            frame = cv2.rotate(frame, cv2.ROTATE_180)
+        elif rotation == 270:
+            frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        if self.config.mirror:
+            frame = cv2.flip(frame, 1)
+        return frame
+
+    def _rotated_dimensions(self, width: int, height: int) -> tuple[int, int]:
+        if self._effective_rotation() in (90, 270):
+            return height, width
+        return width, height
+
+    def camera_model(self) -> dict:
+        with self._lock:
+            raw_width, raw_height = self._raw_width, self._raw_height
+            model = dict(self._camera_model)
+        if raw_width <= 0 or raw_height <= 0:
+            return {}
+        fov = max(20.0, min(140.0, float(self.config.fov_x_degrees)))
+        fx = raw_width / (2.0 * np.tan(np.radians(fov) * 0.5))
+        fy = fx
+        cx, cy = (raw_width - 1) * 0.5, (raw_height - 1) * 0.5
+        rotation = self._effective_rotation()
+        width, height = raw_width, raw_height
+        if rotation == 90:
+            cx, cy, fx, fy = (raw_height - 1) - cy, cx, fy, fx
+            width, height = height, width
+        elif rotation == 180:
+            cx, cy = (raw_width - 1) - cx, (raw_height - 1) - cy
+        elif rotation == 270:
+            cx, cy, fx, fy = cy, (raw_width - 1) - cx, fy, fx
+            width, height = height, width
+        if self.config.mirror:
+            cx = (width - 1) - cx
+        return {
+            "rawWidth": raw_width, "rawHeight": raw_height,
+            "width": width, "height": height, "fx": fx, "fy": fy,
+            "cx": cx, "cy": cy, "rotate": rotation, "mirror": self.config.mirror,
+            "source": "estimated_windows_camera",
+            "sourceOrigin": "configured_windows_camera_fov",
+            "distortion": [],
+            "fovXDegrees": fov,
+            "sourceMetadata": model,
+        }
+
+    def reported_mode(self) -> dict:
+        now = time.monotonic()
+        with self._lock:
+            live = (
+                self._latest_frame is not None
+                and now - self._last_frame_at <= self.config.frame_stale_after_s
+            )
+            times = [value for value in self._times if value >= now - 2.0] if live else []
+            fps = 0.0
+            if len(times) >= 2:
+                fps = (len(times) - 1) / max(times[-1] - times[0], 1e-9)
+            return {
+                "source": "windows_camera",
+                "width": self._rotated_dimensions(self._raw_width, self._raw_height)[0] if live else 0,
+                "height": self._rotated_dimensions(self._raw_width, self._raw_height)[1] if live else 0,
+                "fps": fps, "requestedFps": int(self.config.fps),
+                "deviceIndex": int(self.config.device_index),
+                "backend": self._backend_name or str(self.config.backend),
+                "dropFrames": self._overwritten_frames,
+                "overwrittenFrames": self._overwritten_frames,
+                "capturedFrames": self._captured_frames,
+                "readFailures": self._read_failures,
+                "frameAgeMs": max(0.0, (now - self._last_frame_at) * 1000.0) if self._last_frame_at else None,
+                "buffered": 1 if self._latest_frame is not None else 0,
+                "intrinsicsSource": "estimated_windows_camera",
+                "intrinsicsFovXDegrees": float(self.config.fov_x_degrees),
+                "rotation": self._effective_rotation(),
+                "rotationSource": "manual" if str(self.config.rotate).lower() != "auto" else "default",
+                "error": self._last_error,
+            }
+
+    def _capture_loop(self) -> None:
+        while not self._stop.is_set():
+            capture = self._capture
+            if capture is None:
+                time.sleep(0.1)
+                continue
+            started = time.perf_counter()
+            try:
+                ok, frame = capture.read()
+            except Exception as error:
+                ok, frame = False, None
+                with self._frame_condition:
+                    self._last_error = str(error)
+            if not ok or frame is None:
+                with self._frame_condition:
+                    self._read_failures += 1
+                    if not self._last_error:
+                        self._last_error = "Windows camera frame read failed"
+                    self._frame_condition.notify_all()
+                if self._stop.wait(0.01):
+                    break
+                continue
+            monotonic_now = time.monotonic()
+            raw_height, raw_width = frame.shape[:2]
+            frame = self._preprocess(frame)
+            with self._frame_condition:
+                if self._latest_frame is not None and self._latest_seq != self._last_delivered_seq:
+                    self._overwritten_frames += 1
+                self._raw_height, self._raw_width = raw_height, raw_width
+                self._latest_frame = frame
+                self._latest_t_ms = monotonic_now * 1000.0
+                self._latest_seq += 1
+                self._last_frame_at = monotonic_now
+                self._captured_frames += 1
+                self._times.append(monotonic_now)
+                self._times = [value for value in self._times if value >= monotonic_now - 2.0]
+                self._latest_frame_timings[self._latest_seq] = {
+                    "read_sequence": self._latest_seq,
+                    "source_capture_monotonic_ns": int(monotonic_now * 1_000_000_000.0),
+                    "capture_read_ms": (time.perf_counter() - started) * 1000.0,
+                }
+                for old_sequence in [
+                    value for value in self._latest_frame_timings
+                    if value < self._latest_seq - 8
+                ]:
+                    self._latest_frame_timings.pop(old_sequence, None)
+                self._last_error = ""
+                self._frame_condition.notify_all()
+
+    def release(self) -> None:
+        self._stop.set()
+        with self._frame_condition:
+            self._frame_condition.notify_all()
+        if self._capture is not None:
+            try:
+                self._capture.release()
+            except Exception:
+                pass
+        self._thread.join(timeout=1.0)

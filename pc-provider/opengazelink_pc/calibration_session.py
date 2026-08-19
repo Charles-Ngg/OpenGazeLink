@@ -215,6 +215,17 @@ def _new_dataset(config: ProviderConfig, backend: str) -> dict:
         "screen_camera_mount": SCREEN_CAMERA_MOUNT,
         "camera_position_screen_cm": list(config.camera_position_screen_cm),
         "screen_camera_origin_cm": screen_origin.tolist(),
+        "input_source": config.input_source,
+        "windows_camera": {
+            "device_index": config.windows_camera_index,
+            "width": config.windows_camera_width,
+            "height": config.windows_camera_height,
+            "fps": config.windows_camera_fps,
+            "backend": config.windows_camera_backend,
+            "fov_x_degrees": config.windows_camera_fov_x_degrees,
+            "rotate": config.rotate,
+            "mirror": config.mirror,
+        } if config.input_source == "windows_camera" else None,
         "target_layout": {
             "name": "dense_5x5_plus_light_anchors_plus_crossed_head_pose_v4",
             "columns": 5, "rows": 5,
@@ -295,6 +306,25 @@ def _sample_lighting_name(sample: dict) -> str:
 
 
 def _dataset_geometry_matches(dataset: dict, config: ProviderConfig) -> bool:
+    if dataset.get("input_source", "phone_udp") != config.input_source:
+        return False
+    if config.input_source == "windows_camera":
+        calibrated_camera = dataset.get("windows_camera") or {}
+        expected_camera = {
+            "device_index": config.windows_camera_index,
+            "width": config.windows_camera_width,
+            "height": config.windows_camera_height,
+            "fov_x_degrees": config.windows_camera_fov_x_degrees,
+            "rotate": config.rotate,
+            "mirror": config.mirror,
+        }
+        for key, value in expected_camera.items():
+            actual = calibrated_camera.get(key)
+            if isinstance(value, float):
+                if actual is None or abs(float(actual) - value) > 0.01:
+                    return False
+            elif actual != value:
+                return False
     if dataset.get("screen") != {
         "width": config.screen_width, "height": config.screen_height,
     }:
@@ -376,6 +406,8 @@ def _profile_records_from_datasets(
             "screen_diagonal_inches": reference.get("screen_diagonal_inches"),
             "screen_camera_origin_cm": copy.deepcopy(reference.get("screen_camera_origin_cm")),
             "camera_position_screen_cm": copy.deepcopy(reference.get("camera_position_screen_cm")),
+            "input_source": reference.get("input_source", "phone_udp"),
+            "windows_camera": copy.deepcopy(reference.get("windows_camera")),
             "samples": {
                 backend: grouped[backend][name] for backend in DATASET_PATHS
             },
@@ -438,6 +470,8 @@ def _library_record_matches(record: dict, config: ProviderConfig) -> bool:
         "screen": record.get("screen"),
         "screen_diagonal_inches": record.get("screen_diagonal_inches"),
         "screen_camera_origin_cm": record.get("screen_camera_origin_cm"),
+        "input_source": record.get("input_source", "phone_udp"),
+        "windows_camera": record.get("windows_camera"),
     }, config)
 
 
@@ -450,6 +484,9 @@ def lighting_profile_library_status(config: ProviderConfig) -> dict[str, dict]:
         stat.st_mtime_ns, stat.st_size,
         config.screen_width, config.screen_height, config.screen_diagonal_inches,
         *config.camera_position_screen_cm,
+        config.input_source, config.windows_camera_index,
+        config.windows_camera_width, config.windows_camera_height,
+        config.windows_camera_fov_x_degrees, config.rotate, config.mirror,
     )
     if (
         _LIGHTING_LIBRARY_STATUS_CACHE is not None

@@ -13,6 +13,7 @@ DEFAULT_CONFIG_PATH = CONFIG_PATH
 
 @dataclass
 class ProviderConfig:
+    input_source: str = "phone_udp"
     udp_bind: str = "0.0.0.0"
     udp_port: int = 5007
     discovery_port: int = 5006
@@ -20,6 +21,12 @@ class ProviderConfig:
     paired_phone_name: str = ""
     rotate: str = "auto"
     mirror: bool = False
+    windows_camera_index: int = 0
+    windows_camera_width: int = 640
+    windows_camera_height: int = 480
+    windows_camera_fps: int = 30
+    windows_camera_backend: str = "auto"
+    windows_camera_fov_x_degrees: float = 60.0
     landmarker: str = "legacy"
     lighting_profile: str = "reference"
     screen_width: int = 3840
@@ -60,6 +67,22 @@ class ProviderConfig:
                 setattr(self, key, float(value))
             else:
                 setattr(self, key, str(value))
+        self.input_source = (
+            self.input_source if self.input_source in ("phone_udp", "windows_camera")
+            else "phone_udp"
+        )
+        self.windows_camera_index = max(0, min(64, int(self.windows_camera_index)))
+        self.windows_camera_width = max(320, min(4096, int(self.windows_camera_width)))
+        self.windows_camera_height = max(240, min(4096, int(self.windows_camera_height)))
+        self.windows_camera_fps = max(1, min(120, int(self.windows_camera_fps)))
+        self.windows_camera_backend = (
+            self.windows_camera_backend
+            if self.windows_camera_backend in ("auto", "dshow", "msmf")
+            else "auto"
+        )
+        self.windows_camera_fov_x_degrees = self._finite_clamped(
+            self.windows_camera_fov_x_degrees, 20.0, 140.0,
+        )
         rotate = str(self.rotate).lower()
         self.rotate = rotate if rotate in ("auto", "0", "90", "180", "270") else "auto"
         self.landmarker = self.landmarker if self.landmarker in ("tasks", "legacy") else "legacy"

@@ -832,6 +832,8 @@ class SharedTinyCnnModel:
             "screen_camera_origin_cm": dataset.get(
                 "screen_camera_origin_cm", [0.0, 0.0, 0.0],
             ),
+            "input_source": dataset.get("input_source", "phone_udp"),
+            "windows_camera": dataset.get("windows_camera"),
             "preprocessing": {
                 "model": PREPROCESSING_MODEL,
                 "canonical_eye": "right; left images mirrored and left yaw negated",
