@@ -11,8 +11,8 @@ android {
         applicationId = "com.eyetracing.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 24
-        versionName = "0.11.0-opengazelink"
+        versionCode = 33
+        versionName = "0.16.3-startup-fix"
     }
 
     compileOptions {
@@ -23,9 +23,15 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    // Both bundled languages must remain available to the in-app switch.
+    bundle {
+        language { enableSplit = false }
+    }
 }
 
 dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.activity:activity-ktx:1.10.1")
+    testImplementation("junit:junit:4.13.2")
 }
