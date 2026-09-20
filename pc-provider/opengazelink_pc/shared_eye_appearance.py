@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Sequence
+from typing import TYPE_CHECKING, Iterable, Sequence
 
 import cv2
 import numpy as np
 
-from .normalized_eye import NormalizedEyePatch
+if TYPE_CHECKING:
+    from .normalized_eye import NormalizedEyePatch
 
 
 BASE_WIDTH = 64

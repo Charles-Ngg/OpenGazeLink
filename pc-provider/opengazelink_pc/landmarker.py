@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from . import runtime_clock
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Optional
@@ -52,7 +53,7 @@ class FaceLandmarkerProvider:
 
     def detect_bgr(self, frame_bgr, timestamp_ms: Optional[int] = None):
         if timestamp_ms is None:
-            timestamp_ms = int(time.monotonic() * 1000)
+            timestamp_ms = int(runtime_clock.monotonic() * 1000)
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
         return self.landmarker.detect_for_video(image, timestamp_ms)

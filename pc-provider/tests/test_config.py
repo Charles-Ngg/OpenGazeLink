@@ -1,13 +1,53 @@
 from __future__ import annotations
 
 import unittest
+import json
+from pathlib import Path
+import tempfile
 
-from opengazelink_pc.config import ProviderConfig
+from opengazelink_pc.config import ProviderConfig, load_config
 
 
 class ProviderConfigTest(unittest.TestCase):
     def test_motion_diagnostics_is_disabled_by_default(self) -> None:
         self.assertFalse(ProviderConfig().motion_diagnostics_enabled)
+
+    def test_old_models_and_processing_preferences_migrate_to_the_current_pipeline(self) -> None:
+        config = ProviderConfig()
+        for model in ("calibrated", "conditioned_without_iris", "unknown", "conditioned_video"):
+            config.update({"gaze_model": model, "landmarker": "legacy", "lighting_profile": "dark",
+                           "one_euro_enabled": False, "extrapolation_enabled": True,
+                           "video_forecast_enabled": True, "event_temporal_enabled": False,
+                           "prediction_auto_horizon_enabled": False})
+            self.assertEqual("conditioned_video", config.gaze_model)
+            self.assertEqual("tasks", config.landmarker)
+            self.assertEqual("reference", config.lighting_profile)
+            self.assertTrue(config.one_euro_enabled)
+            self.assertTrue(config.prediction_auto_horizon_enabled)
+            self.assertFalse(config.video_forecast_enabled)
+            self.assertFalse(config.extrapolation_enabled)
+            self.assertFalse(config.event_temporal_enabled)
+
+    def test_fresh_install_uses_pretrained_pipeline(self) -> None:
+        config = ProviderConfig()
+        self.assertEqual(("tasks", "conditioned_video"), (config.landmarker, config.gaze_model))
+        self.assertTrue(config.event_temporal_enabled)
+        self.assertFalse(config.video_forecast_enabled)
+
+    def test_load_migrates_preferences_without_overwriting_saved_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.json"
+            saved = json.dumps({"gaze_model": "calibrated", "landmarker": "legacy",
+                                "lighting_profile": "dark", "one_euro_enabled": False,
+                                "event_temporal_enabled": False, "udp_port": 5012})
+            path.write_text(saved, encoding="utf-8")
+            config = load_config(path)
+            self.assertEqual((config.gaze_model, config.landmarker), ("conditioned_video", "tasks"))
+            self.assertEqual(config.lighting_profile, "reference")
+            self.assertTrue(config.one_euro_enabled)
+            self.assertFalse(config.event_temporal_enabled)
+            self.assertEqual(config.udp_port, 5012)
+            self.assertEqual(path.read_text(encoding="utf-8"), saved)
 
     def test_udp_port_rejects_zero_instead_of_silently_becoming_one(self) -> None:
         config = ProviderConfig()

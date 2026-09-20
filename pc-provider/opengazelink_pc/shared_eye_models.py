@@ -57,6 +57,18 @@ class SharedEyePrediction:
     yaw: float
     pitch: float
     nearest_group_distance: float
+    fusion_weight: float = 0.5
+
+
+def fuse_screen_points(points, weights):
+    """Fuse already projected eye points; weights express relative reliability."""
+    points = np.asarray(points, dtype=np.float64)
+    weights = np.asarray(weights, dtype=np.float64)
+    if points.shape != (2, 2) or weights.shape != (2,):
+        raise ValueError('screen fusion requires exactly two eye points and weights')
+    if not np.isfinite(weights).all() or np.any(weights < 0) or weights.sum() <= 0:
+        raise ValueError('invalid binocular fusion weights')
+    return tuple(np.sum(points * (weights / weights.sum())[:, None], axis=0))
 
 
 @dataclass(frozen=True)

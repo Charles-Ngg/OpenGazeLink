@@ -8,6 +8,8 @@ import mimetypes
 from pathlib import Path
 import socket
 import threading
+import time
+from . import runtime_clock
 import webbrowser
 
 from .calibration_session import (
@@ -23,6 +25,7 @@ from .engine import EyeTrackingEngine
 from .model_registry import ModelRegistry
 from .normalized_eye import screen_camera_origin
 from .paths import WEB_DIR
+from .video_session import VideoSession
 
 
 def _geometry_matches_dataset_status(dataset: dict, config: ProviderConfig) -> bool:
@@ -129,7 +132,7 @@ class ControlApplication:
         self._config_updated = config_updated
         self._shutdown_application = shutdown_application
         self.calibration: CalibrationSession | None = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
 
     def status(self) -> dict:
         calibration = self.calibration.status() if self.calibration is not None else {
@@ -208,6 +211,10 @@ class ControlApplication:
             "lighting_profiles": _lighting_profile_status(artifacts, self.config),
             "calibration": calibration,
         }
+        from .stability_profile import read_profile
+        profile = read_profile(self.config, self.engine.camera.camera_model())
+        result["stability"] = {"automatic": True, "calibrated": profile is not None,
+                               "created_at": profile.get("created_at") if profile else None}
         if self._host_status is not None:
             result["application"] = self._host_status()
         return result
@@ -269,6 +276,18 @@ class ControlApplication:
                 "pose_targets": self.calibration.pose_targets,
                 **self.calibration.status(),
             }
+
+    def start_video(self, purpose="current_gaze", plan=None) -> dict:
+        with self._lock:
+            if self.calibration is not None and self.calibration.status()["active"]:
+                raise RuntimeError("calibration is already active")
+            self.config.require_geometry()
+            input_status = self.engine.input_status()
+            if not input_status["ready"]:
+                raise RuntimeError(input_status["error"])
+            self.engine.stop_tracking()
+            self.calibration = VideoSession(self.engine.camera, self.config, self.registry, purpose=purpose, plan=plan)
+            return self.calibration.status()
 
     def complete_calibration_lighting_profiles(self, profile_names: list[str]) -> dict:
         with self._lock:
@@ -374,13 +393,14 @@ def _handler(application: ControlApplication):
             payload = json.loads(self.rfile.read(size).decode("utf-8"))
             return payload if isinstance(payload, dict) else {}
 
-        def _gaze_stream(self) -> None:
+        def _gaze_stream(self, include_performance: bool = False) -> None:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
             self.send_header("Connection", "keep-alive")
             self.end_headers()
             last_sequence = -1
+            last_sent_at = 0.0
             try:
                 while True:
                     gaze = application.engine.wait_for_gaze(last_sequence, timeout_s=1.0)
@@ -388,11 +408,23 @@ def _handler(application: ControlApplication):
                     if sequence == last_sequence:
                         self.wfile.write(b": keepalive\n\n")
                     else:
+                        last_sequence = sequence
+                        now = runtime_clock.monotonic()
+                        # The performance page displays one-second aggregates;
+                        # serializing and rendering them at camera FPS adds CPU
+                        # work without adding information. Preview remains full
+                        # rate and carries no performance payload.
+                        if include_performance and now - last_sent_at < 0.2:
+                            continue
+                        streamed_gaze = gaze
+                        if not include_performance and "performance" in gaze:
+                            streamed_gaze = dict(gaze)
+                            streamed_gaze.pop("performance", None)
                         body = json.dumps(
-                            gaze, ensure_ascii=False, separators=(",", ":"),
+                            streamed_gaze, ensure_ascii=False, separators=(",", ":"),
                         ).encode("utf-8")
                         self.wfile.write(b"data: " + body + b"\n\n")
-                        last_sequence = sequence
+                        last_sent_at = now
                     self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError, OSError):
                 return
@@ -438,7 +470,13 @@ def _handler(application: ControlApplication):
         def do_GET(self) -> None:
             path = self.path.split("?", 1)[0]
             if path == "/api/status":
-                self._json(application.status())
+                # Always return a JSON error for status failures.  Letting an
+                # exception escape closes the HTTP socket, which browsers
+                # report only as the misleading generic "failed to fetch".
+                try:
+                    self._json(application.status())
+                except Exception as error:
+                    self._error(error, status=500)
                 return
             if path == "/api/windows-cameras":
                 self._json({"cameras": application.windows_cameras()})
@@ -447,7 +485,8 @@ def _handler(application: ControlApplication):
                 self._json(application.engine.latest_gaze())
                 return
             if path == "/api/gaze/stream":
-                self._gaze_stream()
+                query = self.path.split("?", 1)[1] if "?" in self.path else ""
+                self._gaze_stream(include_performance="performance=1" in query.split("&"))
                 return
             if path == "/api/frame.mjpg":
                 self._frame_stream()
@@ -467,6 +506,11 @@ def _handler(application: ControlApplication):
             static = {
                 "/": "index.html", "/index.html": "index.html",
                 "/app.js": "app.js", "/styles.css": "styles.css",
+                "/i18n.js": "i18n.js",
+                "/video.js": "video.js",
+                "/video-plan.js": "video-plan.js",
+                "/prediction-plan.js": "prediction-plan.js",
+                "/unified-plan.js": "unified-plan.js",
             }.get(path)
             if static is None:
                 self.send_error(404)
@@ -505,6 +549,28 @@ def _handler(application: ControlApplication):
                     self._json({"ok": True, **application.forget_pairing()})
                 elif path == "/api/calibration/start":
                     self._json({"ok": True, **application.start_calibration()})
+                elif path == "/api/video/clock":
+                    self._json({"ok": True, "pc_ms": runtime_clock.monotonic() * 1000})
+                elif path == "/api/video/start":
+                    self._json({"ok": True, **application.start_video()})
+                elif path == "/api/prediction/start":
+                    self._json({"ok": True, **application.start_video("prediction")})
+                elif path == "/api/calibration/unified/start":
+                    self._json({"ok": True, **application.start_video("unified", body.get("plan"))})
+                elif path in ("/api/video/pause", "/api/video/resume", "/api/video/review"):
+                    if not isinstance(application.calibration, VideoSession):
+                        raise RuntimeError("VIDEO session has not started")
+                    session = application.calibration
+                    result = session.pause(body.get("discard_segment")) if path.endswith("pause") else session.resume() if path.endswith("resume") else session.review()
+                    self._json({"ok": True, **result})
+                elif path == "/api/video/events":
+                    if not isinstance(application.calibration, VideoSession):
+                        raise RuntimeError("VIDEO session has not started")
+                    self._json({"ok": True, **application.calibration.add_events(body)})
+                elif path == "/api/video/finish":
+                    if not isinstance(application.calibration, VideoSession):
+                        raise RuntimeError("VIDEO session has not started")
+                    self._json({"ok": True, **application.calibration.finish()})
                 elif path == "/api/calibration/lighting-profiles":
                     selected = body.get("profile_names") or []
                     if not isinstance(selected, list):

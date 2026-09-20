@@ -7,12 +7,23 @@ from pathlib import Path
 import shutil
 import threading
 import time
+from . import runtime_clock
 
 import cv2
 import numpy as np
 
+from . import conditioned_eye as conditioned_eye_pipeline
+from .conditioned_eye import VERSION as CONDITIONED_EYE_VERSION
+from .conditioned_eye_capture import (
+    CONDITIONED_EYE_CAPTURE_SCHEMA,
+    CONDITIONED_EYE_ORDER,
+    CONDITIONED_EYE_RUNNING_MODE,
+    file_sha256,
+    save_conditioned_capture,
+)
 from .config import ProviderConfig
 from .model_registry import DATASET_PATHS, MODEL_PATHS, ModelRegistry
+from .landmarker import DEFAULT_MODEL_PATH
 from .normalized_eye import (
     EYE_PLANE_HEIGHT_CM,
     EYE_PLANE_WIDTH_CM,
@@ -24,7 +35,7 @@ from .normalized_eye import (
     screen_camera_origin,
     target_camera_point,
 )
-from .paths import DATA_DIR, USER_ROOT
+from .paths import DATA_DIR, RESOURCE_ROOT, USER_ROOT
 from .shared_eye_appearance import (
     BASE_HEIGHT,
     BASE_WIDTH,
@@ -202,12 +213,67 @@ def sample_payload(
     }
 
 
+def conditioned_capture_arrays(observation, target_camera: np.ndarray) -> dict[str, np.ndarray]:
+    """Freeze the Tasks VIDEO inputs and labels used by the conditioned model."""
+    inputs = observation.conditioned_inputs
+    if inputs is None or len(inputs) != 2:
+        raise ValueError("Tasks calibration observation has no conditioned-eye inputs")
+    arrays = {
+        name: np.stack([np.asarray(value[name]) for value in inputs])
+        for name in ("images", "points", "head", "crop", "rotation", "center")
+    }
+    targets = []
+    camera_targets = []
+    for side, value in zip(CONDITIONED_EYE_ORDER, inputs):
+        rotation = np.asarray(value["rotation"], dtype=np.float64).reshape(3, 3)
+        center = np.asarray(value["center"], dtype=np.float64).reshape(3)
+        camera_direction = np.asarray(target_camera, dtype=np.float64) - center
+        camera_direction /= max(float(np.linalg.norm(camera_direction)), 1e-12)
+        local = rotation.T @ camera_direction
+        local /= max(float(np.linalg.norm(local)), 1e-12)
+        if local[2] <= 1e-9:
+            raise ValueError("conditioned-eye target is outside the head-forward hemisphere")
+        if side == "left":
+            local[0] *= -1.0
+        targets.append(local.astype(np.float32))
+        camera_targets.append(camera_direction.astype(np.float32))
+    arrays.update({
+        "targets": np.stack(targets),
+        "camera_target": np.stack(camera_targets),
+        "pose_degrees": np.tile(np.degrees([
+            observation.head_yaw, observation.head_pitch, observation.head_roll,
+        ]), (2, 1)).astype(np.float32),
+    })
+    return arrays
+
+
+def conditioned_eye_preprocessing_sha256() -> str:
+    """Hash the exact preprocessing source in source and frozen builds.
+
+    PyInstaller loads Python modules from its embedded archive, so ``__file__``
+    can name a virtual ``.pyc`` that does not exist on disk.  The release keeps
+    a provenance-only copy of the source alongside its resources for this
+    checksum.
+    """
+    module_path = Path(conditioned_eye_pipeline.__file__)
+    source_path = module_path.with_suffix(".py") if module_path.suffix in (".pyc", ".pyo") else module_path
+    if source_path.is_file():
+        return file_sha256(source_path)
+    packaged_source = RESOURCE_ROOT / "provenance" / "opengazelink_pc" / "conditioned_eye.py"
+    if packaged_source.is_file():
+        return file_sha256(packaged_source)
+    raise FileNotFoundError(
+        "conditioned-eye preprocessing provenance source is missing: "
+        f"checked {source_path} and {packaged_source}"
+    )
+
+
 def _new_dataset(config: ProviderConfig, backend: str) -> dict:
     screen_origin = screen_camera_origin(
         config.screen_width, config.screen_height,
         config.screen_diagonal_inches, config.camera_position_screen_cm,
     )
-    return {
+    dataset = {
         "schema": SHARED_DATASET_SCHEMA,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "screen": {"width": config.screen_width, "height": config.screen_height},
@@ -263,6 +329,28 @@ def _new_dataset(config: ProviderConfig, backend: str) -> dict:
         },
         "passes": [], "samples": [],
     }
+    if backend == "tasks":
+        dataset["conditioned_eye_capture"] = {
+            "schema": CONDITIONED_EYE_CAPTURE_SCHEMA,
+            "preprocessing_version": CONDITIONED_EYE_VERSION,
+            "preprocessing_sha256": conditioned_eye_preprocessing_sha256(),
+            "mediapipe_running_mode": CONDITIONED_EYE_RUNNING_MODE,
+            "landmarker_model_sha256": file_sha256(DEFAULT_MODEL_PATH),
+            "storage": "one compressed NPZ sidecar per accepted frame",
+            "eye_order": list(CONDITIONED_EYE_ORDER),
+            "arrays": {
+                "images": [2, 2, 2, 36, 64],
+                "points": [2, 2, 52],
+                "head": [2, 10],
+                "crop": [2, 8],
+                "targets": [2, 3],
+                "rotation": [2, 3, 3],
+                "center": [2, 3],
+                "camera_target": [2, 3],
+                "pose_degrees": [2, 3],
+            },
+        }
+    return dataset
 
 
 def _save(path: Path, payload: dict) -> None:
@@ -739,7 +827,10 @@ class CalibrationSession:
         self._staging_dir: Path | None = None
         self._staged_artifacts: list[tuple[Path, Path]] = []
         self._diagnostics: dict = {}
-        self.backends = {name: NormalizedEyeBackend(name) for name in ("legacy", "tasks")}
+        self.backends = {
+            "legacy": NormalizedEyeBackend("legacy"),
+            "tasks": NormalizedEyeBackend("tasks", conditioned=True),
+        }
         self.datasets = {name: _new_dataset(config, name) for name in self.backends}
         for dataset in self.datasets.values():
             dataset["passes"].append({
@@ -846,11 +937,27 @@ class CalibrationSession:
                 self.config.camera_position_screen_cm,
             ),
         )
-        for name, observation in observations.items():
-            self.datasets[name]["samples"].append(sample_payload(
+        payloads = {
+            name: sample_payload(
                 observation, target, target_camera, condition, self.pass_id,
                 project_relative_path(raw_path), lighting, pose_bin,
-            ))
+            )
+            for name, observation in observations.items()
+        }
+        tasks_observation = observations.get("tasks")
+        if tasks_observation is not None and tasks_observation.conditioned_inputs is not None:
+            capture_path = self.capture_dir / "conditioned-eye-inputs" / f"{suffix}.npz"
+            descriptor = save_conditioned_capture(
+                capture_path,
+                conditioned_capture_arrays(tasks_observation, target_camera),
+            )
+            payloads["tasks"]["conditioned_eye_input"] = {
+                **descriptor,
+                "path": project_relative_path(capture_path),
+                "preprocessing_version": CONDITIONED_EYE_VERSION,
+            }
+        for name, payload in payloads.items():
+            self.datasets[name]["samples"].append(payload)
 
     def _save_partials(self) -> None:
         for name, dataset in self.datasets.items():
@@ -871,12 +978,12 @@ class CalibrationSession:
             target = targets[current_index]
             profile = target["lighting"]
             duration_s = float(profile["duration_ms"]) / 1000.0
-            started = time.monotonic()
+            started = runtime_clock.monotonic()
             deadline = started + duration_s
             slots: list[tuple[np.ndarray, dict, float] | None] = [None] * self.samples_per_target
             opening_history: list[float] = []
             rejected_blinks = 0
-            while time.monotonic() < deadline:
+            while runtime_clock.monotonic() < deadline:
                 ok, frame, t_ms, sequence = self.camera.read_latest(
                     self._last_sequence, timeout_s=0.25,
                 )
@@ -892,7 +999,7 @@ class CalibrationSession:
                 if self._blink_like(observations, opening_history):
                     rejected_blinks += 1
                     continue
-                progress = min(0.999999, max(0.0, (time.monotonic() - started) / duration_s))
+                progress = min(0.999999, max(0.0, (runtime_clock.monotonic() - started) / duration_s))
                 slot = min(self.samples_per_target - 1, int(progress * self.samples_per_target))
                 score = self._candidate_score(observations, opening_history)
                 current = slots[slot]
@@ -940,14 +1047,14 @@ class CalibrationSession:
                 **self.pose_targets[self.pose_index],
             }
             duration_s = float(target["lighting"]["duration_ms"]) / 1000.0
-            started = time.monotonic()
+            started = runtime_clock.monotonic()
             deadline = started + duration_s
             slots: list[tuple[np.ndarray, dict, float, tuple[int, int]] | None] = [
                 None
             ] * POSE_SAMPLES_PER_TARGET
             opening_history: list[float] = []
             rejected_blinks = 0
-            while time.monotonic() < deadline:
+            while runtime_clock.monotonic() < deadline:
                 ok, frame, t_ms, sequence = self.camera.read_latest(
                     self._last_sequence, timeout_s=0.25,
                 )
@@ -970,7 +1077,7 @@ class CalibrationSession:
                 )
                 progress = min(
                     0.999999,
-                    max(0.0, (time.monotonic() - started) / duration_s),
+                    max(0.0, (runtime_clock.monotonic() - started) / duration_s),
                 )
                 slot = min(
                     POSE_SAMPLES_PER_TARGET - 1,
@@ -1262,12 +1369,12 @@ class LightingAdaptationSession(CalibrationSession):
                 raise ValueError(f"expected target {self.index}, received {expected_index}")
             target = self.targets[self.index]
             duration_s = float(target["lighting"]["duration_ms"]) / 1000.0
-            started = time.monotonic()
+            started = runtime_clock.monotonic()
             deadline = started + duration_s
             slots: list[tuple[np.ndarray, dict, float] | None] = [None] * self.samples_per_target
             opening_history: list[float] = []
             rejected_blinks = 0
-            while time.monotonic() < deadline:
+            while runtime_clock.monotonic() < deadline:
                 ok, frame, t_ms, sequence = self.camera.read_latest(
                     self._last_sequence, timeout_s=0.25,
                 )
@@ -1283,7 +1390,7 @@ class LightingAdaptationSession(CalibrationSession):
                 if self._blink_like(observations, opening_history):
                     rejected_blinks += 1
                     continue
-                progress = min(0.999999, max(0.0, (time.monotonic() - started) / duration_s))
+                progress = min(0.999999, max(0.0, (runtime_clock.monotonic() - started) / duration_s))
                 slot = min(self.samples_per_target - 1, int(progress * self.samples_per_target))
                 score = self._candidate_score(observations, opening_history)
                 current = slots[slot]

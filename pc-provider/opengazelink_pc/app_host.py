@@ -4,7 +4,7 @@ from pathlib import Path
 import threading
 import time
 
-from .config import DEFAULT_CONFIG_PATH, load_config
+from .config import DEFAULT_CONFIG_PATH, load_config, save_config
 from .control_server import ControlApplication, ControlServer
 from .engine import EyeTrackingEngine
 from .model_registry import ModelRegistry
@@ -35,19 +35,33 @@ class ApplicationHost:
             shutdown_application=self.request_shutdown,
         )
         if self.config.paired_phone_id:
-            self._set_allowed_source_ip("0.0.0.0")
+            self._set_allowed_source_ip(self.config.paired_phone_address or "0.0.0.0")
         self.pairing = PairingService(
             self.config.udp_bind,
             self.config.discovery_port,
             lambda: self.application.config.udp_port,
             self._paired_phone,
-            self._set_allowed_source_ip,
+            self._remember_paired_source,
         )
 
     def _set_allowed_source_ip(self, address: str | None) -> None:
         setter = getattr(self.engine.camera, "set_allowed_source_ip", None)
         if setter is not None:
             setter(address)
+
+    def _remember_paired_source(self, address: str) -> None:
+        # Discovery entries are transient UI candidates, not the connection
+        # allowlist. Retain the last accepted address across saves and restarts.
+        with self.application._lock:
+            config = self.application.config
+            if not config.paired_phone_id:
+                return
+            if config.paired_phone_address != address:
+                import logging
+                config.paired_phone_address = address
+                save_config(config, self.config_path)
+                logging.getLogger("eyetracing").info("paired phone address refreshed: %s", address)
+            self._set_allowed_source_ip(address)
 
     def _camera_source_status(self) -> dict:
         getter = getattr(self.engine.camera, "source_status", None)
@@ -76,8 +90,7 @@ class ApplicationHost:
         if not config.paired_phone_id:
             self._set_allowed_source_ip(None)
             return
-        pending = self.pairing.pending_phone(config.paired_phone_id) if self.pairing else None
-        self._set_allowed_source_ip(pending.address if pending else "0.0.0.0")
+        self._set_allowed_source_ip(config.paired_phone_address or "0.0.0.0")
 
     def accept_pairing(self, phone_id: str) -> dict:
         pairing = self.pairing
@@ -89,6 +102,7 @@ class ApplicationHost:
         self.application.update_config({
             "paired_phone_id": pending.phone_id,
             "paired_phone_name": pending.name,
+            "paired_phone_address": pending.address,
         })
         self.config = self.application.config
         self._set_allowed_source_ip(pending.address)
@@ -98,6 +112,7 @@ class ApplicationHost:
         self.application.update_config({
             "paired_phone_id": "",
             "paired_phone_name": "",
+            "paired_phone_address": "",
         })
         self.config = self.application.config
         self._set_allowed_source_ip(None)

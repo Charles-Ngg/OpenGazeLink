@@ -1,996 +1,525 @@
-const $ = (id) => document.getElementById(id);
+const $ = id => document.getElementById(id);
 let state = null;
 let activePage = "control";
-let calibration = {
-  active: false, phase: "idle", targets: [], lightTargets: [], poseTargets: [],
-  index: 0, lightIndex: 0, poseIndex: 0, busy: false
-};
-let toastTimer = 0;
 let actionBusy = false;
 let configDirty = false;
-let frameStreamActive = false;
-let gazeStream = null;
-let gazeArrivalTimes = [];
-let artifactRenderKey = "";
+let toastTimer = 0;
 let statusTimer = 0;
 let statusRequestPending = false;
-let lightingInventoryKey = "";
-let lightingSelectionKey = "";
-let lightingSelectionMode = "calibration";
-let dismissedRecoveryKey = "";
+let applicationClosed = false;
+let frameStreamActive = false;
+let gazeStream = null;
+let gazeStreamIncludesPerformance = false;
+let gazeArrivalTimes = [];
+let latencyHistory = [];
+let lastLatencySequence = null;
+let lastPerformance = null;
 
 async function request(path, options = {}) {
   const response = await fetch(path, {
-    cache: "no-store",
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-    ...options
+    cache: "no-store", ...options,
+    headers: { "Content-Type": "application/json", ...(options.headers || {}) }
   });
   const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || `${response.status}`);
+  if (!response.ok) throw new Error(payload.error || String(response.status));
   return payload;
 }
-
 function post(path, body = {}) {
   return request(path, { method: "POST", body: JSON.stringify(body) });
 }
-
 function toast(message) {
-  window.clearTimeout(toastTimer);
-  $("toast").textContent = message;
+  clearTimeout(toastTimer);
+  $("toast").textContent = describeRuntimeError(message);
   $("toast").hidden = false;
-  toastTimer = window.setTimeout(() => { $("toast").hidden = true; }, 3500);
+  toastTimer = setTimeout(() => { $("toast").hidden = true; }, 5000);
 }
-
-function setPage(page) {
-  activePage = page;
-  document.querySelectorAll(".nav-button").forEach((button) => button.classList.toggle("active", button.dataset.page === page));
-  document.querySelectorAll(".page").forEach((element) => element.classList.remove("active"));
-  $(`${page}Page`).classList.add("active");
-  if (state) renderStatus(state);
-  syncStreams();
-  refreshStatus();
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[c]));
 }
-
-function numericInput(id, label) {
+function describeRuntimeError(message) {
+  const messages = {
+    "landmarker produced no face": ["未检测到人脸，请看向相机", "No face detected. Look toward the camera."],
+    "waiting for Camera2 intrinsics": ["等待手机发送相机内参", "Waiting for camera intrinsics from the phone"],
+    "waiting for phone frames": ["等待手机画面", "Waiting for phone frames"],
+    "calibration is active": ["请先结束当前校准", "Finish the current calibration first"],
+    "cannot change configuration during calibration": ["校准期间不能修改设置", "Settings cannot change during calibration"],
+    "Failed to fetch": ["无法连接电脑服务，请确认程序正在运行", "Cannot connect to the PC service. Check that it is running."],
+  };
+  const pair = messages[message];
+  return pair ? tr(...pair) : (message || "");
+}
+function numericInput(id) {
   const input = $(id);
   const value = input.valueAsNumber;
   const minimum = input.min === "" ? -Infinity : Number(input.min);
   const maximum = input.max === "" ? Infinity : Number(input.max);
-  if (!Number.isFinite(value) || value < minimum || value > maximum) {
-    throw new Error(`${label}填写无效`);
+  const step = Number(input.step || 1), origin = Number(input.min || 0);
+  // Commands temporarily disable controls; native checkValidity then skips them.
+  const stepValid = input.step === "any" || Math.abs((value - origin) / step - Math.round((value - origin) / step)) < 1e-6;
+  if (!input.checkValidity() || !Number.isFinite(value) || value < minimum || value > maximum || !stepValid) {
+    input.closest("details")?.setAttribute("open", "");
+    input.focus();
+    throw new Error(tr("请填写有效数值：", "Enter a valid value: ") + (input.closest("label")?.querySelector("span")?.textContent || id));
   }
   return value;
 }
-
+const numberFields = {
+  udpPort: "udp_port", windowsCameraWidth: "windows_camera_width",
+  windowsCameraHeight: "windows_camera_height", windowsCameraFps: "windows_camera_fps",
+  windowsCameraFov: "windows_camera_fov_x_degrees", screenWidth: "screen_width",
+  screenHeight: "screen_height", screenDiagonal: "screen_diagonal_inches",
+  cameraOffsetX: "camera_offset_x_cm", cameraOffsetY: "camera_offset_y_cm", cameraOffsetZ: "camera_offset_z_cm"
+};
+const textFields = {
+  inputSource: "input_source", rotate: "rotate", windowsCameraIndex: "windows_camera_index",
+  windowsCameraBackend: "windows_camera_backend", sharedMemory: "shared_memory_name"
+};
 function configPayload() {
-  const landmarker = document.querySelector('input[name="landmarker"]:checked');
-  if (!state || !landmarker) throw new Error("配置尚未加载完成");
-  return {
-    landmarker: landmarker.value,
-    input_source: $("inputSource").value,
-    lighting_profile: $("lightingProfile").value,
-    udp_port: numericInput("udpPort", "UDP端口"),
-    rotate: $("rotate").value,
-    mirror: $("mirror").checked,
-    windows_camera_index: Number($("windowsCameraIndex").value),
-    windows_camera_width: numericInput("windowsCameraWidth", "PC摄像头宽度"),
-    windows_camera_height: numericInput("windowsCameraHeight", "PC摄像头高度"),
-    windows_camera_fps: numericInput("windowsCameraFps", "PC摄像头 FPS"),
-    windows_camera_backend: $("windowsCameraBackend").value,
-    windows_camera_fov_x_degrees: numericInput("windowsCameraFov", "PC摄像头水平视场角"),
-    screen_width: numericInput("screenWidth", "屏幕宽度"),
-    screen_height: numericInput("screenHeight", "屏幕高度"),
-    screen_diagonal_inches: numericInput("screenDiagonal", "屏幕尺寸"),
-    camera_offset_x_cm: numericInput("cameraOffsetX", "相机水平位置"),
-    camera_offset_y_cm: numericInput("cameraOffsetY", "相机垂直位置"),
-    camera_offset_z_cm: numericInput("cameraOffsetZ", "相机深度位置"),
-    geometry_configured: true,
-    shared_memory_name: $("sharedMemory").value,
-    one_euro_enabled: $("oneEuroEnabled").checked,
-    one_euro_min_cutoff: numericInput("oneEuroMinCutoff", "最小截止频率"),
-    one_euro_beta: numericInput("oneEuroBeta", "速度响应 beta"),
-    one_euro_derivative_cutoff: numericInput("oneEuroDerivativeCutoff", "导数截止频率"),
-    extrapolation_enabled: $("extrapolationEnabled").checked,
-    extrapolation_horizon_ms: numericInput("extrapolationHorizon", "预测时域"),
-    extrapolation_max_lead_fraction: numericInput(
-      "extrapolationMaxLeadPercent", "最大外推距离"
-    ) / 100,
-    motion_diagnostics_enabled: $("motionDiagnosticsEnabled").checked
-  };
+  if (!state) throw new Error(tr("配置尚未加载", "Settings have not loaded"));
+  const payload = { geometry_configured: true };
+  for (const [id, field] of Object.entries(numberFields)) payload[field] = numericInput(id);
+  for (const [id, field] of Object.entries(textFields)) payload[field] = $(id).value;
+  payload.windows_camera_index = Number(payload.windows_camera_index);
+  if (!Number.isInteger(payload.windows_camera_index) || payload.windows_camera_index < 0) {
+    throw new Error(tr("请选择摄像头", "Select a camera"));
+  }
+  if (!payload.shared_memory_name.trim()) throw new Error(tr("共享内存名称不能为空", "Shared memory name is required"));
+  payload.mirror = $("mirror").checked;
+  // This is the only prediction preference. Stability remains automatic.
+  payload.event_temporal_enabled = $("eventTemporalEnabled").checked;
+  return payload;
 }
-
 function applyConfig(config) {
-  document.querySelector(`input[name="landmarker"][value="${config.landmarker}"]`).checked = true;
-  $("lightingProfile").value = config.lighting_profile || "reference";
-  $("inputSource").value = config.input_source || "phone_udp";
-  $("udpPort").value = config.udp_port;
-  $("rotate").value = config.rotate;
-  $("mirror").checked = config.mirror;
-  $("windowsCameraIndex").value = config.windows_camera_index ?? 0;
-  $("windowsCameraWidth").value = config.windows_camera_width ?? 640;
-  $("windowsCameraHeight").value = config.windows_camera_height ?? 480;
-  $("windowsCameraFps").value = config.windows_camera_fps ?? 30;
-  $("windowsCameraBackend").value = config.windows_camera_backend || "auto";
-  $("windowsCameraFov").value = config.windows_camera_fov_x_degrees ?? 60;
-  $("screenWidth").value = config.screen_width;
-  $("screenHeight").value = config.screen_height;
-  $("screenDiagonal").value = config.screen_diagonal_inches;
-  $("cameraOffsetX").value = config.camera_offset_x_cm;
-  $("cameraOffsetY").value = config.camera_offset_y_cm;
-  $("cameraOffsetZ").value = config.camera_offset_z_cm;
-  $("sharedMemory").value = config.shared_memory_name;
-  $("oneEuroEnabled").checked = config.one_euro_enabled;
-  $("oneEuroMinCutoff").value = config.one_euro_min_cutoff;
-  $("oneEuroBeta").value = config.one_euro_beta;
-  $("oneEuroDerivativeCutoff").value = config.one_euro_derivative_cutoff;
-  $("extrapolationEnabled").checked = config.extrapolation_enabled;
-  $("extrapolationHorizon").value = config.extrapolation_horizon_ms;
-  $("extrapolationMaxLeadPercent").value = Number(
-    config.extrapolation_max_lead_fraction || 0
-  ) * 100;
-  $("motionDiagnosticsEnabled").checked = Boolean(config.motion_diagnostics_enabled);
+  for (const [id, field] of Object.entries(numberFields)) $(id).value = config[field];
+  const cameraIndex = String(config.windows_camera_index ?? 0);
+  if (!Array.from($("windowsCameraIndex").options).some(o => o.value === cameraIndex)) {
+    $("windowsCameraIndex").add(new Option("Camera " + cameraIndex, cameraIndex));
+  }
+  for (const [id, field] of Object.entries(textFields)) $(id).value = config[field];
+  $("mirror").checked = Boolean(config.mirror);
+  $("eventTemporalEnabled").checked = config.event_temporal_enabled !== false;
+  $("windowsCameraSettings").hidden = config.input_source !== "windows_camera";
   configDirty = false;
-  renderConfigApplyStatus();
 }
-
 function renderConfigApplyStatus() {
-  const element = $("configApplyStatus");
-  if (!element) return;
-  element.classList.toggle("dirty", configDirty);
-  element.classList.toggle("applied", !configDirty && Boolean(state));
-  element.textContent = configDirty
-    ? "有未保存修改 · 保存后立即应用到控制台、预览和后台共享内存"
-    : (state ? "已应用 · 保存配置会立即重载运行参数；未启动时不会向游戏发送数据" : "配置尚未加载");
+  $("configApplyStatus").classList.toggle("dirty", configDirty);
+  $("configApplyStatus").textContent = !state ? tr("正在连接…", "Connecting…")
+    : configDirty ? tr("有未保存的修改", "You have unsaved changes")
+    : !state.config.geometry_configured ? tr("请确认屏幕与相机位置，再保存", "Confirm screen and camera position, then save")
+    : tr("设置已保存", "Settings saved");
+  $("saveConfigButton").disabled = !state || actionBusy || Boolean(state?.calibration?.active)
+    || (!configDirty && Boolean(state?.config?.geometry_configured));
 }
-
-function renderConfiguredProcessing(config) {
-  if (!config) return;
-  const filterText = config.one_euro_enabled
-    ? `稳定 A 开启 · cutoff ${Number(config.one_euro_min_cutoff || 0).toFixed(2)} / β ${Number(config.one_euro_beta || 0).toFixed(2)}`
-    : "稳定 A 关闭";
-  const extrapolationText = config.extrapolation_enabled
-    ? `补偿 B ${Number(config.extrapolation_horizon_ms || 0).toFixed(0)} ms`
-    : "补偿 B 关闭";
-  $("previewPostprocess").textContent = `${filterText} · ${extrapolationText}`;
-  $("previewMotionMode").textContent = "模式 -";
+async function saveConfig() {
+  const result = await post("/api/config", configPayload());
+  applyConfig(result.config);
+  if (state) state.config = result.config;
 }
-
-function lightingProfileLabel(name) {
-  return name === "reference" ? "参考光照" : name;
-}
-
-function escapeHtml(value) {
-  return String(value).replace(/[&<>"']/g, (character) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
-  }[character]));
-}
-
-function setLightingProfileSelection(name) {
-  for (const id of ["lightingProfile", "calibrationLightingProfile"]) {
-    const select = $(id);
-    if (Array.from(select.options).some((option) => option.value === name)) {
-      select.value = name;
-    }
-  }
-}
-
-function renderLightingProfiles(names, configuredName, inventory = []) {
-  const profiles = names.length ? names : ["reference"];
-  for (const id of ["lightingProfile", "calibrationLightingProfile"]) {
-    const select = $(id);
-    const currentOptions = Array.from(select.options).map((option) => option.value);
-    if (JSON.stringify(currentOptions) !== JSON.stringify(profiles)) {
-      select.innerHTML = profiles.map((name) =>
-        `<option value="${name}">${lightingProfileLabel(name)}</option>`
-      ).join("");
-      select.value = profiles.includes(configuredName) ? configuredName : "reference";
-    }
-  }
-  const activeName = profiles.includes(configuredName) ? configuredName : "reference";
-  $("activeLightingProfile").textContent = `当前：${lightingProfileLabel(activeName)}`;
-  $("lightingProfileList").textContent = `已保存：${profiles.map(lightingProfileLabel).join("、")}`;
-  const profileItems = inventory.length ? inventory : profiles.map((name) => ({
-    name, builtin: ["reference", "dark", "bright"].includes(name),
-    deletable: name !== "reference", reusable: false, model_present: true,
-    sample_frames: { legacy: 0, tasks: 0 }, geometry_matches: true,
-  }));
-  const inventoryKey = JSON.stringify(profileItems);
-  if (inventoryKey !== lightingInventoryKey) {
-    lightingInventoryKey = inventoryKey;
-    $("lightingProfileItems").innerHTML = profileItems.map((item) => {
-      const name = escapeHtml(item.name);
-      const frames = item.sample_frames || {};
-      const frameText = item.builtin
-        ? "完整校准会重新生成"
-        : item.reusable
-          ? `${frames.legacy || 0}/${frames.tasks || 0} 帧 · 可在完整校准后重训${item.model_present ? "" : " · 当前模型未加载"}`
-          : `${frames.legacy || 0}/${frames.tasks || 0} 帧${item.geometry_matches ? "" : " · 几何不匹配"}`;
-      return `<div class="profile-item">
-        <strong class="profile-name">${escapeHtml(lightingProfileLabel(item.name))}</strong>
-        <span class="profile-meta">${frameText}</span>
-        <button class="profile-delete" type="button" data-delete-profile="${name}"${item.deletable ? "" : " disabled"}>删除预设</button>
-      </div>`;
-    }).join("");
-  }
-}
-
-function metric(label, value) {
-  return `<div><dt>${label}</dt><dd>${value ?? "-"}</dd></div>`;
-}
-
-function describeRuntimeError(message) {
-  const translations = {
-    "landmarker produced no face": "未检测到人脸",
-    "waiting for Camera2 intrinsics": "正在等待 Camera2 内参"
-  };
-  return translations[message] || message || "";
-}
-
-function renderArtifacts(artifacts) {
-  const order = [
-    ["legacy_cnn", "O Legacy + CNN"],
-    ["tasks_cnn", "N Tasks + CNN"]
-  ];
-  const renderKey = JSON.stringify({
-    models: order.map(([key]) => {
-      const item = artifacts.models[key] || {};
-      const holdout = item.holdout || {};
-      return [key, item.ready, item.compatible, item.schema, item.created_at, holdout.validation_median_deg ?? holdout.median_deg];
-    }),
-    datasets: ["legacy", "tasks"].map((key) => {
-      const item = artifacts.datasets[key] || {};
-      return [key, item.ready, item.compatible, item.schema, item.samples, item.targets, item.created_at];
-    })
+function setPage(page) {
+  if (!["control", "calibration", "preview", "performance"].includes(page)) return;
+  activePage = page;
+  document.querySelectorAll(".nav-button").forEach(button => {
+    const selected = button.dataset.page === page;
+    button.classList.toggle("active", selected);
+    if (selected) button.setAttribute("aria-current", "page"); else button.removeAttribute("aria-current");
   });
-  if (renderKey === artifactRenderKey) return;
-  artifactRenderKey = renderKey;
-  $("artifactGrid").innerHTML = order.map(([key, label]) => {
-    const item = artifacts.models[key] || {};
-    const holdout = item.holdout || {};
-    const median = holdout.validation_median_deg ?? holdout.median_deg;
-    const usable = item.ready && item.compatible !== false;
-    return `<div class="artifact ${usable ? "ready" : "missing"}">
-      <strong>${label}</strong><span>${usable ? `已训练${median != null ? ` · ${Number(median).toFixed(2)} deg` : ""}` : "需要重新校准"}</span>
-    </div>`;
-  }).join("");
-  $("datasetGrid").innerHTML = ["legacy", "tasks"].map((key) => {
-    const item = artifacts.datasets[key] || {};
-    const usable = item.ready && item.compatible !== false;
-    return `<div class="artifact ${usable ? "ready" : "missing"}"><strong>${key === "legacy" ? "O Legacy" : "N Tasks"}</strong>
-      <span>${usable ? `${item.samples || 0} 帧 · ${item.targets || 0} 个采样组` : "需要重新校准"}</span></div>`;
-  }).join("");
+  document.querySelectorAll(".page").forEach(element => element.classList.toggle("active", element.id === page + "Page"));
+  if (state) renderStatus(state);
+  syncStreams();
+  refreshStatus();
 }
-
+function modelReady(payload) {
+  const model = payload.artifacts?.models?.tasks_conditioned_video || {};
+  return Boolean(model.ready && model.compatible !== false);
+}
+function readinessMessage(payload, needsModel = true) {
+  if (!payload.engine?.input?.ready) return tr("请先连接相机并开始传输画面。", "Connect a camera and start streaming first.");
+  if (!payload.geometry?.configured) return tr("请在运行页确认屏幕与相机位置，并保存设置。", "Confirm and save the screen and camera position on Connect & run.");
+  if (needsModel && !modelReady(payload)) return tr("请先完成第一阶段位置校准。", "Complete stage 1 position calibration first.");
+  return "";
+}
 function renderPairing(application = {}) {
   const pairing = application.pairing || {};
-  const source = application.phone_source || {};
   const paired = Boolean(pairing.paired_phone_id);
-  $("pairingSummary").textContent = paired
-    ? `已配对：${pairing.paired_phone_name || pairing.paired_phone_id}`
-    : "尚未配对";
+  $("pairingSummary").textContent = paired ? tr("已配对", "Paired") : tr("未配对", "Not paired");
   $("pairingDetail").textContent = paired
-    ? `电脑 ${pairing.pc_name || "OpenGazeLink"} · 手机地址 ${source.allowed_source_ip || "等待重新发现"}`
-    : `发现端口 ${pairing.discovery_port || 5006} · 在手机端点击“发现电脑”`;
-  const pending = pairing.pending || [];
-  $("pairingCandidates").innerHTML = pending.map((phone) => `
-    <div class="profile-item">
-      <strong class="profile-name">${escapeHtml(phone.name || "Android phone")}</strong>
-      <span class="profile-meta">${escapeHtml(phone.address || "")}</span>
-      <button class="button secondary" type="button" data-accept-phone="${escapeHtml(phone.phone_id)}">确认配对</button>
-    </div>
-  `).join("");
-  $("forgetPairingButton").disabled = !paired || actionBusy;
+    ? (pairing.paired_phone_name || "Android") + " · " + (application.phone_source?.allowed_source_ip || tr("等待手机", "Waiting for phone"))
+    : tr("手机与电脑接入同一网络或 USB 共享网络，在手机端点击“发现电脑”。", "Use the same network or USB tethering, then tap “Find PC” on the phone.");
+  $("pairingCandidates").innerHTML = (pairing.pending || []).map(phone =>
+    '<div class="pairing-item"><div><strong>' + escapeHtml(phone.name || "Android") + '</strong><br><span>' +
+    escapeHtml(phone.address || "") + '</span></div><button type="button" class="button secondary" data-accept-phone="' +
+    escapeHtml(phone.phone_id) + '">' + tr("确认配对", "Pair") + "</button></div>"
+  ).join("");
+  $("forgetPairingButton").disabled = !paired || actionBusy || Boolean(state?.calibration?.active);
 }
-
-function renderFirstRun({ paired, cameraReady, intrinsicsReady, geometryReady, modelReady, inputSource }) {
-  const localCamera = inputSource === "windows_camera";
-  $("pairingPanel").hidden = localCamera;
-  $("setupPairing").querySelector("strong").textContent = localCamera ? "1. PC 摄像头" : "1. 手机连接";
-  $("setupCamera").querySelector("strong").textContent = localCamera ? "2. 画面输入" : "2. 画面与内参";
-  const update = (id, ready, readyText, missingText) => {
-    const element = $(id);
-    element.classList.toggle("ready", ready);
-    element.classList.toggle("missing", !ready);
-    element.querySelector("span").textContent = ready ? readyText : missingText;
+function renderStability(payload) {
+  const profile = payload.stability || {};
+  $("stabilityStatus").textContent = profile.calibrated
+    ? tr("自动稳定 · 已使用第二阶段采集结果", "Automatic stability · using stage 2 data")
+    : tr("自动稳定 · 使用默认判断，可在第二阶段完善", "Automatic stability · defaults active; refine in stage 2");
+}
+function renderCalibration(calibration = {}) {
+  const phases = {
+    unified_capture: ["正在采集", "Capturing"],
+    unified_training: ["正在准备训练", "Preparing training"],
+    unified_replay: ["正在处理采集画面", "Processing captured frames"],
+    unified_spatial: ["正在训练位置模型", "Training position model"],
+    unified_prediction: ["正在检查时序", "Checking temporal behavior"],
+    video_alignment: ["正在对齐采集数据", "Aligning captured data"],
+    personal_eye_and_binocular_fusion: ["正在准备个人双眼模型训练", "Preparing personal binocular training"],
+    video_joint_current_temporal_prediction: ["正在导出位置模型", "Exporting position model"],
+    unified_complete: ["位置校准完成，新模型已启用", "Position calibration complete; new model is active"],
+    unified_kept_existing: ["已完成检查，继续使用原模型", "Evaluation complete; keeping the existing model"],
+    event_replay: ["正在检查眼跳与注视", "Evaluating saccades and fixations"],
+    event_evaluation_complete: ["第二阶段完成，位置模型保持不变", "Stage 2 complete; position model unchanged"],
+    idle: ["可以开始校准", "Ready to calibrate"],
   };
-  update("setupPairing", paired || cameraReady, "手机已连接", "等待自动配对或手动地址");
-  update("setupCamera", cameraReady && intrinsicsReady, "画面与 Camera2 内参有效", "在手机端开始传输");
-  update("setupGeometry", geometryReady, "屏幕几何已保存", "填写屏幕尺寸与相机位置并保存");
-  update("setupModel", modelReady, "所选模型可运行", "完成首次完整校准");
-  if (localCamera) {
-    update("setupPairing", true, "PC 摄像头已选择", "选择 PC 摄像头");
-    update("setupCamera", cameraReady && intrinsicsReady, "PC 摄像头画面有效", "等待 PC 摄像头画面");
-  }
-  $("firstRunPanel").hidden = cameraReady && intrinsicsReady && geometryReady && modelReady;
+  const phase = calibration.state === "paused" ? tr("采集已暂停", "Capture paused")
+    : calibration.state === "cancelled" ? tr("本次任务已结束，数据已保留", "Run ended; data kept")
+    : tr(...(phases[calibration.phase] || [calibration.phase || "可以开始校准", calibration.phase || "Ready to calibrate"]));
+  $("videoStatus").textContent = describeRuntimeError(calibration.error) || phase +
+    (calibration.valid_frames ? " · " + calibration.valid_frames + tr(" 个有效帧", " valid frames") : "");
+  const training = calibration.state === "training";
+  const bar = $("trainingProgress"), progress = calibration.progress || {};
+  bar.hidden = !training;
+  if (training && progress.total > 0) {
+    bar.max = progress.total; bar.value = progress.completed;
+    $("videoStatus").textContent = progress.stage === "replay"
+      ? tr(`回放处理：${progress.completed}/${progress.total} 段 · ${progress.workers} 路并行`, `Replay: ${progress.completed}/${progress.total} sequences · ${progress.workers} workers`)
+      : tr(`位置模型训练：第 ${progress.completed}/${progress.total} 轮`, `Position model: epoch ${progress.completed}/${progress.total}`);
+  } else bar.removeAttribute("value");
+  const model = state?.artifacts?.models?.tasks_conditioned_video || {};
+  const created = model.created_at ? new Date(model.created_at) : null;
+  const stamp = created && !Number.isNaN(created.getTime()) ? created.toLocaleString(language === "en" ? "en-US" : "zh-CN") : tr("时间未知", "Unknown time");
+  $("activeModelInfo").textContent = model.ready
+    ? tr("当前模型训练于：", "Current model trained: ") + stamp + (model.compatible === false ? tr("（当前设置不兼容）", " (incompatible with current settings)") : "")
+    : tr("尚无已训练的位置模型", "No trained position model yet");
 }
-
 function renderStatus(payload) {
+  if (applicationClosed) return;
   const first = state === null;
   state = payload;
-  if (first) applyConfig(payload.config);
-  const engine = payload.engine;
+  if (first || (!configDirty && !actionBusy)) applyConfig(payload.config);
+  if (first && !payload.geometry?.configured) $("geometrySettings").open = true;
+  const engine = payload.engine || {};
   const camera = engine.camera || {};
-  const intrinsics = engine.intrinsics || {};
-  const cameraReady = Number(camera.width) > 0 && Number(camera.height) > 0;
-  if (cameraReady) {
-    $("cameraStage").style.aspectRatio = `${Number(camera.width)} / ${Number(camera.height)}`;
-  } else {
-    $("cameraStage").style.removeProperty("aspect-ratio");
-  }
-  const input = engine.input || { ready: cameraReady, error: cameraReady ? "" : "未收到手机画面" };
-  const geometryReady = payload.geometry?.configured === true;
-  const modelKey = `${payload.config.landmarker}_cnn`;
-  const selectedModel = payload.artifacts?.models?.[modelKey] || {};
-  const modelReady = selectedModel.ready && selectedModel.compatible !== false;
-  const intrinsicsReady = payload.config.input_source === "windows_camera"
-    ? cameraReady && intrinsics.source === "estimated_windows_camera"
-    : Boolean(intrinsics.source && intrinsics.source !== "estimated_frame_center");
-  const calibrationState = payload.calibration || {};
-  const motionDiagnostics = engine.motion_diagnostics || {};
-  const availableLightingProfiles = selectedModel.lighting_profiles?.length
-    ? selectedModel.lighting_profiles : ["reference"];
-  renderLightingProfiles(
-    availableLightingProfiles, payload.config.lighting_profile,
-    payload.lighting_profiles || [],
-  );
-  const startError = input.error || (modelReady ? "" : "所选模型文件缺失或不兼容");
-  $("cameraDot").className = `status-dot ${cameraReady ? "ok" : "warn"}`;
-  const cameraLabel = payload.config.input_source === "windows_camera" ? "PC 摄像头" : "手机";
-  $("cameraSummary").textContent = cameraReady ? `${cameraLabel} ${camera.width}x${camera.height} · ${Number(camera.fps || 0).toFixed(1)} FPS` : `等待${cameraLabel}`;
-  if (cameraReady) {
-    $("cameraSummary").textContent += payload.config.input_source === "windows_camera"
-      ? ` · 覆盖旧帧 ${Number(camera.overwrittenFrames || 0)}`
-      : ` · queue ${Number(camera.transportQueueMs || 0).toFixed(1)} ms · decode ${Number(camera.decodeMs || 0).toFixed(1)} ms`;
-  }
-  $("frameRate").textContent = activePage === "control"
-    ? `${Number(camera.fps || 0).toFixed(1)} FPS 连续流`
-    : "已暂停";
-  $("runtimeDot").className = `status-dot ${engine.tracking ? "ok" : ""}`;
-  const hostMode = payload.application?.mode === "runtime" ? "后台" : "控制";
-  $("runtimeSummary").textContent = engine.tracking ? `${hostMode} · 共享内存运行中` : `${hostMode} · 未运行`;
-  $("runtimeDetail").textContent = startError || describeRuntimeError(engine.error) || `${payload.config.shared_memory_name} · ${Number(engine.inference_ms?.mean || 0).toFixed(2)} ms`;
-  const selection = `${payload.config.landmarker === "legacy" ? "O Legacy" : "N Tasks"} + CNN`;
-  $("selectionLabel").textContent = selection;
-  $("previewMode").textContent = selection;
-  renderConfiguredProcessing(payload.config);
-  $("motionDiagnosticsStatus").classList.toggle("active", Boolean(motionDiagnostics.active));
-  $("motionDiagnosticsStatus").classList.toggle("warning", Number(motionDiagnostics.dropped_records || 0) > 0);
-  $("motionDiagnosticsStatus").textContent = motionDiagnostics.active
-    ? `正在记录 ${Number(motionDiagnostics.sample_count || 0)} 帧 · 丢弃 ${Number(motionDiagnostics.dropped_records || 0)} · ${motionDiagnostics.path || "正在创建文件"}`
-    : (motionDiagnostics.path ? `最近记录 · ${motionDiagnostics.path}` : "未开始记录");
-  $("intrinsicsSource").textContent = intrinsics.source || "未收到";
-  $("intrinsicsGrid").innerHTML = [
-    metric("宽度", intrinsics.width), metric("高度", intrinsics.height),
-    metric("fx", intrinsics.fx != null ? Number(intrinsics.fx).toFixed(3) : "-"),
-    metric("fy", intrinsics.fy != null ? Number(intrinsics.fy).toFixed(3) : "-"),
-    metric("cx", intrinsics.cx != null ? Number(intrinsics.cx).toFixed(3) : "-"),
-    metric("cy", intrinsics.cy != null ? Number(intrinsics.cy).toFixed(3) : "-"),
-    metric("镜头", intrinsics.sourceMetadata?.lensFacing || "-"),
-    metric("旋转", `${intrinsics.rotate ?? camera.rotation ?? "-"} (${camera.rotationSource === "phone" ? "手机" : "手动"})`)
-  ].join("");
-  renderArtifacts(payload.artifacts);
-  renderPairing(payload.application);
-  renderFirstRun({
-    paired: Boolean(payload.application?.pairing?.paired_phone_id),
-    cameraReady, intrinsicsReady, geometryReady, modelReady,
-    inputSource: payload.config.input_source,
-  });
-  $("saveConfigButton").disabled = !configDirty;
-  renderConfigApplyStatus();
+  const calibration = payload.calibration || {};
+  const busy = actionBusy || Boolean(calibration.active);
+  const ready = modelReady(payload);
+  const inputReady = Boolean(engine.input?.ready);
+  const geometryReady = Boolean(payload.geometry?.configured);
+  $("runtimeDot").classList.toggle("ok", Boolean(engine.tracking));
+  $("runtimeDot").classList.toggle("warn", Boolean(engine.error));
+  $("runtimeSummary").textContent = engine.tracking ? tr("运行中", "Running") : tr("已停止", "Stopped");
+  $("runtimeDetail").textContent = describeRuntimeError(engine.error) || (engine.tracking
+    ? tr("正在向共享内存输出注视位置，关闭网页也会继续运行。", "Sending gaze to shared memory. Tracking continues when this page is closed.")
+    : readinessMessage(payload) || tr("准备就绪，可以启动追踪。", "Ready to start tracking."));
+  const width = Number(camera.width) || 0, height = Number(camera.height) || 0;
+  $("cameraSummary").textContent = width && height
+    ? width + " × " + height + " · " + (inputReady ? tr("画面已连接", "Camera connected") : tr("等待新画面", "Waiting for a fresh frame"))
+    : tr("相机尚未连接", "No camera connected");
+  $("frameRate").textContent = Number(camera.fps || camera.receiveFps || 0).toFixed(1) + " FPS";
+  $("pairingPanel").hidden = payload.config.input_source === "windows_camera";
+  const hint = readinessMessage(payload);
+  $("firstRunPanel").hidden = !hint;
+  $("firstRunPanel").textContent = hint;
+  $("calibrationReadiness").textContent = readinessMessage(payload, false) ||
+    (ready ? tr("相机和位置模型已就绪，可重做第一阶段或开始第二阶段。", "Camera and position model are ready. Repeat stage 1 or start stage 2.")
+      : tr("相机已就绪，请先完成第一阶段。", "Camera is ready. Complete stage 1 first."));
+  $("calibrationReadiness").classList.toggle("ready", inputReady && geometryReady);
   $("geometryStatus").textContent = geometryReady
-    ? "屏幕与相机位置已确认"
-    : "首次校准前必须确认并保存屏幕与相机位置";
-  $("geometryStatus").classList.toggle("ready", geometryReady);
-  $("startButton").disabled = engine.tracking || !input.ready || !modelReady || !geometryReady || actionBusy;
-  $("stopButton").disabled = !engine.tracking;
-  $("backgroundButton").disabled = !modelReady || !geometryReady || actionBusy;
-  $("startCalibrationButton").disabled = !input.ready || !geometryReady || calibrationState.active || actionBusy;
-  $("startLightingAdaptationButton").disabled = !input.ready || !modelReady || !geometryReady
-    || !selectedModel.lighting_profiles?.includes("reference") || actionBusy;
-  $("applyLightingProfileButton").disabled = !modelReady || actionBusy;
-  $("previewStartButton").disabled = ((!input.ready || !modelReady) && !engine.tracking) || actionBusy;
-  $("previewStartButton").textContent = actionBusy
-    ? "正在启动"
-    : (engine.tracking ? (document.fullscreenElement === $("previewPage") ? "停止预览" : "进入全屏") : "启动预览");
-  $("calibrationStatus").textContent = calibrationState.active
-    ? (calibrationState.phase === "lighting_profile_selection"
-      ? "新基座已训练，等待选择保留的光照预设"
-      : calibrationState.phase === "lighting_profile_training"
-        ? "正在新基座上重训光照适配层"
-        : calibrationState.phase === "head_pose"
-      ? `交叉头姿 ${calibrationState.pose_index || 0}/${calibrationState.pose_total || 20}`
-      : calibrationState.phase === "light_anchor"
-        ? `光照锚点 ${calibrationState.light_index || 0}/${calibrationState.light_total || 10}`
-        : `静态眼动 ${calibrationState.index || 0}/${calibrationState.total || 25}`)
-    : (!geometryReady
-      ? "请先在运行控制中确认并保存屏幕与相机位置"
-      : (input.error || "25 点静态眼动 + 10 个光照锚点 + 4 头姿 × 5 注视点"));
-  if (calibrationState.state === "awaiting_profiles") {
-    showLightingProfileSelection(
-      calibrationState.available_lighting_profiles || [], "calibration",
-    );
-  } else if (!calibrationState.active && !actionBusy) {
-    const recoverable = (payload.lighting_profiles || []).filter(
-      (item) => item.reusable && !item.model_present
-    ).map((item) => ({name: item.name, sample_frames: item.sample_frames || {}}));
-    const recoveryKey = `restore:${JSON.stringify(recoverable)}`;
-    if (recoverable.length && recoveryKey !== dismissedRecoveryKey) {
-      showLightingProfileSelection(recoverable, "restore");
-    } else if (!recoverable.length && !$("lightingSelectionModal").hidden) {
-      hideLightingProfileSelection();
-    }
+    ? tr("已保存。调整位置后请重新校准。", "Saved. Recalibrate after moving the camera or screen.")
+    : tr("首次使用必须确认这些数值。", "Confirm these values before your first calibration.");
+  $("modelStatus").textContent = ready ? tr("当前模型可用", "Current model ready") : tr("需要位置校准", "Position calibration needed");
+  $("startButton").disabled = Boolean(engine.tracking) || !inputReady || !ready || !geometryReady || busy;
+  $("stopButton").disabled = !engine.tracking || actionBusy;
+  $("backgroundButton").disabled = !inputReady || !ready || !geometryReady || busy;
+  $("exitButton").disabled = busy;
+  $("startVideoButton").disabled = !inputReady || !geometryReady || busy;
+  $("startEventButton").disabled = !inputReady || !geometryReady || !ready || busy;
+  $("startEventButton").title = ready ? "" : tr("请先完成第一阶段", "Complete stage 1 first");
+  $("previewStartButton").disabled = busy || (!engine.tracking && (!inputReady || !ready || !geometryReady));
+  $("previewStartButton").textContent = document.fullscreenElement === $("previewPage")
+    ? tr("退出全屏", "Exit fullscreen") : tr("全屏预览", "Fullscreen preview");
+  $("configForm").querySelectorAll("input, select, button").forEach(element => { element.disabled = busy; });
+  $("language").disabled = actionBusy;
+  renderConfigApplyStatus();
+  renderPairing(payload.application);
+  renderStability(payload);
+  renderCalibration(calibration);
+  const intrinsics = engine.intrinsics || {};
+  $("intrinsicsSource").textContent = intrinsics.source === "estimated_windows_camera"
+    ? tr("由电脑摄像头视场角估算", "Estimated from PC camera field of view")
+    : intrinsics.source ? tr("来自手机 Camera2", "Provided by phone Camera2") : tr("等待内参", "Waiting for intrinsics");
+  $("intrinsicsGrid").innerHTML = ["width", "height", "fx", "fy", "cx", "cy"].map(key =>
+    "<div><dt>" + ({ width: tr("宽度", "Width"), height: tr("高度", "Height") }[key] || key) +
+    "</dt><dd>" + (Number.isFinite(Number(intrinsics[key])) && intrinsics[key] != null ? Number(intrinsics[key]).toFixed(key.length === 2 ? 2 : 0) : "—") + "</dd></div>"
+  ).join("");
+  if (!engine.tracking) {
+    $("previewState").textContent = tr("追踪未启动", "Tracking is stopped");
+    $("combinedDot").hidden = true;
   }
-  if (activePage === "preview" && !engine.tracking) {
-    $("previewState").textContent = startError || "等待启动";
-  }
+  $("previewPostprocess").textContent = payload.config.event_temporal_enabled !== false
+    ? tr("自动稳定 · 眼跳预测开", "Automatic stability · prediction on")
+    : tr("自动稳定 · 眼跳预测关", "Automatic stability · prediction off");
+  renderPerformance(engine.performance || lastPerformance);
   syncStreams();
 }
-
 async function refreshStatus() {
-  if (statusRequestPending) return;
+  if (statusRequestPending || applicationClosed) return;
   statusRequestPending = true;
   try { renderStatus(await request("/api/status")); }
-  catch (error) { toast(error.message); }
-  finally {
+  catch (error) {
+    $("runtimeSummary").textContent = tr("连接中断", "Disconnected");
+    $("runtimeDetail").textContent = describeRuntimeError(error.message);
+    $("runtimeDot").classList.remove("ok");
+  } finally {
     statusRequestPending = false;
-    scheduleStatusRefresh();
+    clearTimeout(statusTimer);
+    if (!document.hidden && !applicationClosed) statusTimer = setTimeout(refreshStatus,
+      ["preview", "performance"].includes(activePage) && state?.engine?.tracking ? 3000 : 1000);
   }
 }
-
 async function refreshWindowsCameras() {
   const button = $("refreshWindowsCamerasButton");
   button.disabled = true;
   try {
-    const payload = await request("/api/windows-cameras");
-    const select = $("windowsCameraIndex");
-    const selected = String(select.value || state?.config?.windows_camera_index || 0);
-    const cameras = payload.cameras || [];
-    select.innerHTML = cameras.length
-      ? cameras.map((camera) => `<option value="${Number(camera.index)}">${escapeHtml(camera.name || `Windows camera ${camera.index}`)} (${Number(camera.width || 0)}x${Number(camera.height || 0)})</option>`).join("")
-      : `<option value="${selected}">未发现摄像头（设备 ${selected}）</option>`;
-    select.value = Array.from(select.options).some((option) => option.value === selected)
-      ? selected : String(cameras[0]?.index ?? selected);
-  } finally {
-    button.disabled = false;
-  }
+    const result = await request("/api/windows-cameras");
+    const select = $("windowsCameraIndex"), previous = select.value;
+    select.replaceChildren();
+    (result.cameras || []).forEach(camera => select.add(new Option(camera.name || "Camera " + camera.index, String(camera.index))));
+    if (!Array.from(select.options).some(o => o.value === previous)) {
+      select.add(new Option(tr("设备 ", "Device ") + previous + tr("（未检测到）", " (not detected)"), previous));
+    }
+    select.value = previous;
+  } finally { button.disabled = Boolean(state?.calibration?.active) || actionBusy; }
 }
-
-function scheduleStatusRefresh() {
-  window.clearTimeout(statusTimer);
-  statusTimer = 0;
-  if (document.hidden || (activePage === "preview" && state?.engine?.tracking)) return;
-  statusTimer = window.setTimeout(refreshStatus, state?.engine?.input?.ready ? 1000 : 500);
-}
-
-function startFrameStream() {
-  if (frameStreamActive || Number(state?.engine?.camera?.width || 0) <= 0) return;
-  frameStreamActive = true;
-  $("cameraFrame").hidden = false;
-  $("cameraPlaceholder").hidden = true;
-  $("cameraFrame").src = `/api/frame.mjpg?t=${Date.now()}`;
-}
-
 function stopFrameStream() {
-  if (!frameStreamActive) return;
   frameStreamActive = false;
   $("cameraFrame").removeAttribute("src");
   $("cameraFrame").hidden = true;
   $("cameraPlaceholder").hidden = false;
 }
-
-$("cameraFrame").addEventListener("error", () => {
-  frameStreamActive = false;
-  $("cameraFrame").hidden = true;
-  $("cameraPlaceholder").hidden = false;
-});
-
 function syncStreams() {
-  const cameraReady = Number(state?.engine?.camera?.width || 0) > 0;
-  if (!document.hidden && activePage === "control" && cameraReady) startFrameStream();
-  else stopFrameStream();
-  if (!document.hidden && activePage === "preview") startGazeStream();
-  else stopGazeStream();
+  const showFrame = !document.hidden && !applicationClosed && activePage === "control" && state?.engine?.input?.ready;
+  if (showFrame && !frameStreamActive) {
+    frameStreamActive = true;
+    $("cameraFrame").src = "/api/frame.mjpg?t=" + Date.now();
+    $("cameraFrame").hidden = false;
+    $("cameraPlaceholder").hidden = true;
+  } else if (!showFrame && frameStreamActive) stopFrameStream();
+  const showGaze = !document.hidden && !applicationClosed && ["preview", "performance"].includes(activePage);
+  if (showGaze) startGazeStream(); else stopGazeStream();
 }
-
-function showCalibrationTarget() {
-  const isPose = calibration.phase === "head_pose";
-  const isQuickLight = calibration.phase === "light_adaptation";
-  const isLight = calibration.phase === "light_anchor" || isQuickLight;
-  const list = isPose ? calibration.poseTargets : (calibration.phase === "light_anchor" ? calibration.lightTargets : calibration.targets);
-  const index = isPose ? calibration.poseIndex : (calibration.phase === "light_anchor" ? calibration.lightIndex : calibration.index);
-  const target = list[index];
-  if (!target) return;
-  const width = Math.max(1, state.config.screen_width - 1);
-  const height = Math.max(1, state.config.screen_height - 1);
-  $("calibrationTarget").style.left = `${target.x / width * 100}%`;
-  $("calibrationTarget").style.top = `${target.y / height * 100}%`;
-  $("calibrationTarget").classList.toggle("pose-target", isPose);
-  if (isPose) {
-    $("calibrationMessage").textContent = "交叉头姿 " + (calibration.poseIndex + 1) + "/" + calibration.poseTargets.length + " · " + target.pose_instruction + "，眼睛盯住蓝点并保持头部不动";
-  } else {
-    const lighting = target.lighting || {};
-    const lightText = isLight ? (" · 光照" + (lighting.name || "anchor")) : " · 参考光照";
-    const current = index;
-    $("calibrationMessage").textContent = "注视点 " + (current + 1) + "/" + list.length + " · 盯住蓝点，点击采集" + lightText;
-  }
-  const level = target.lighting?.start ?? 0.42;
-  setCalibrationLight(level);
-  $("calibrationTarget").classList.remove("collecting");
-}
-
-function setCalibrationLight(level) {
-  const clamped = Math.max(0, Math.min(1, Number(level) || 0));
-  const value = Math.round(255 * clamped);
-  $("calibrationOverlay").style.backgroundColor = `rgb(${value},${value},${value})`;
-}
-
-function animateCalibrationLight(profile) {
-  if (!profile || profile.mode !== "transition") {
-    setCalibrationLight(profile?.end ?? profile?.start ?? 0.22);
-    return Promise.resolve();
-  }
-  const duration = Math.max(300, Number(profile.duration_ms || 1800));
-  const started = performance.now();
-  return new Promise((resolve) => {
-    const tick = (now) => {
-      const progress = Math.min(1, (now - started) / duration);
-      setCalibrationLight(Number(profile.start) + (Number(profile.end) - Number(profile.start)) * progress);
-      if (progress < 1) window.requestAnimationFrame(tick);
-      else resolve();
-    };
-    window.requestAnimationFrame(tick);
-  });
-}
-
-function showLightingProfileSelection(items, mode = "calibration") {
-  const profiles = Array.isArray(items) ? items : [];
-  lightingSelectionMode = mode;
-  const key = `${mode}:${JSON.stringify(profiles)}`;
-  if (key !== lightingSelectionKey) {
-    lightingSelectionKey = key;
-    $("lightingSelectionItems").innerHTML = profiles.map((item) => {
-      const name = escapeHtml(item.name);
-      const frames = item.sample_frames || {};
-      return `<div class="selection-item">
-        <label><input type="checkbox" data-lighting-selection="${name}" checked><strong>${escapeHtml(lightingProfileLabel(item.name))}</strong></label>
-        <span>${frames.legacy || 0}/${frames.tasks || 0} 帧</span>
-      </div>`;
-    }).join("");
-  }
-  $("lightingSelectionTitle").textContent = mode === "restore"
-    ? "恢复光照预设到当前模型" : "保留光照预设";
-  $("lightingSelectionDescription").textContent = mode === "restore"
-    ? "检测到上次完整校准前保存的光照样本。选择要在当前新基座上补训的适配层，无需重新进行完整校准。"
-    : "新基座已经训练完成。选择要用旧样本在新模型上重新训练的自定义光照适配层。";
-  $("abandonCalibrationButton").textContent = mode === "restore" ? "稍后" : "放弃本次校准";
-  $("completeLightingSelectionButton").textContent = mode === "restore"
-    ? "重训所选适配层" : "保留所选并完成";
-  $("lightingSelectionModal").hidden = false;
-}
-
-function hideLightingProfileSelection() {
-  $("lightingSelectionModal").hidden = true;
-  lightingSelectionKey = "";
-}
-
-async function completeLightingProfileSelection() {
-  if (actionBusy) return;
-  actionBusy = true;
-  const selected = Array.from(
-    $("lightingSelectionItems").querySelectorAll("[data-lighting-selection]:checked")
-  ).map((input) => input.dataset.lightingSelection);
-  $("completeLightingSelectionButton").disabled = true;
-  $("completeLightingSelectionButton").textContent = "正在重训适配层";
-  try {
-    const endpoint = lightingSelectionMode === "restore"
-      ? "/api/lighting-profiles/retrain" : "/api/calibration/lighting-profiles";
-    const result = await post(endpoint, {
-      profile_names: selected,
-    });
-    hideLightingProfileSelection();
-    if (lightingSelectionMode === "calibration") {
-      calibration.active = false;
-      calibration.phase = "idle";
-    }
-    await refreshStatus();
-    const retained = result.retained_lighting_profiles || result.profile_names || [];
-    toast(retained.length
-      ? `新模型已保留：${retained.map(lightingProfileLabel).join("、")}`
-      : "新模型已保存，未保留自定义光照预设");
-  } finally {
-    actionBusy = false;
-    $("completeLightingSelectionButton").disabled = false;
-    $("completeLightingSelectionButton").textContent = lightingSelectionMode === "restore"
-      ? "重训所选适配层" : "保留所选并完成";
-    refreshStatus();
-  }
-}
-
-async function abandonPendingCalibration() {
-  if (actionBusy) return;
-  if (lightingSelectionMode === "restore") {
-    dismissedRecoveryKey = lightingSelectionKey;
-    hideLightingProfileSelection();
-    return;
-  }
-  if (!window.confirm("放弃这次已经训练但尚未提交的完整校准？当前模型不会被替换。")) return;
-  actionBusy = true;
-  try {
-    await post("/api/calibration/cancel");
-    hideLightingProfileSelection();
-    calibration.active = false;
-    calibration.phase = "idle";
-    toast("已放弃本次完整校准，原模型保持不变");
-  } finally {
-    actionBusy = false;
-    refreshStatus();
-  }
-}
-
-async function startCalibration() {
-  if (actionBusy) return;
-  if (!state?.engine?.input?.ready) throw new Error(state?.engine?.input?.error || "输入尚未准备好");
-  actionBusy = true;
-  $("calibrationOverlay").hidden = false;
-  $("calibrationTarget").hidden = true;
-  $("calibrationMessage").textContent = "正在启动校准";
-  try {
-    await $("calibrationOverlay").requestFullscreen();
-    await post("/api/config", configPayload());
-    const result = await post("/api/calibration/start");
-    if (result.calibration_schema !== "crossed-head-pose-4x5-v1") {
-      await post("/api/calibration/cancel").catch(() => {});
-      throw new Error("前端与校准后端版本不一致，请重启电脑端控制程序");
-    }
-    calibration = {
-      active: true, phase: result.phase || "static",
-      targets: result.targets, lightTargets: result.light_targets || [],
-      poseTargets: result.pose_targets || [], index: 0, lightIndex: 0,
-      poseIndex: 0, busy: false
-    };
-    $("calibrationTarget").hidden = false;
-    showCalibrationTarget();
-  } catch (error) {
-    $("calibrationOverlay").hidden = true;
-    if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
-    throw error;
-  } finally {
-    actionBusy = false;
-    refreshStatus();
-  }
-}
-
-async function startLightingAdaptation() {
-  if (actionBusy) return;
-  if (!state?.engine?.input?.ready) throw new Error(state?.engine?.input?.error || "输入尚未准备好");
-  actionBusy = true;
-  $("calibrationOverlay").hidden = false;
-  $("calibrationTarget").hidden = true;
-  $("calibrationMessage").textContent = "正在启动光照适配";
-  try {
-    await $("calibrationOverlay").requestFullscreen();
-    await post("/api/config", configPayload());
-    const result = await post("/api/lighting-adaptation/start", {
-      profile_name: $("lightingAdaptationName").value,
-      screen_level: Number($("lightingAdaptationLevel").value || 0.42)
-    });
-    $("lightingAdaptationName").value = result.profile_name || $("lightingAdaptationName").value;
-    calibration = {
-      active: true, phase: "light_adaptation", targets: result.targets || [],
-      lightTargets: [], poseTargets: [], index: 0, lightIndex: 0,
-      poseIndex: 0, busy: false
-    };
-    $("calibrationTarget").hidden = false;
-    showCalibrationTarget();
-  } catch (error) {
-    $("calibrationOverlay").hidden = true;
-    if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
-    throw error;
-  } finally {
-    actionBusy = false;
-    refreshStatus();
-  }
-}
-
-async function applyLightingProfile() {
-  if (actionBusy) return;
-  actionBusy = true;
-  try {
-    setLightingProfileSelection($("calibrationLightingProfile").value);
-    await post("/api/config", configPayload());
-    await refreshStatus();
-    toast(`已应用光照预设：${lightingProfileLabel(state.config.lighting_profile)}`);
-  } finally {
-    actionBusy = false;
-    refreshStatus();
-  }
-}
-
-async function deleteLightingProfile(profileName) {
-  if (actionBusy) return;
-  if (!window.confirm(`删除光照预设“${profileName}”？活动数据会从当前数据集移除，原始诊断图片仍保留。`)) return;
-  actionBusy = true;
-  try {
-    await post("/api/lighting-profiles/delete", { profile_name: profileName });
-    if ($("lightingProfile").value === profileName) setLightingProfileSelection("reference");
-    await refreshStatus();
-    toast(`光照预设已删除：${profileName}`);
-  } finally {
-    actionBusy = false;
-    refreshStatus();
-  }
-}
-
-async function startPreview() {
-  if (actionBusy) return;
-  if (!state?.engine?.input?.ready && !state?.engine?.tracking) {
-    throw new Error(state?.engine?.input?.error || "输入尚未准备好");
-  }
-  if (state?.engine?.tracking && document.fullscreenElement === $("previewPage")) {
-    await post("/api/tracking/stop");
-    await document.exitFullscreen();
-    await refreshStatus();
-    return;
-  }
-  actionBusy = true;
-  $("previewStartButton").disabled = true;
-  $("previewStartButton").textContent = "正在启动";
-  try {
-    await $("previewPage").requestFullscreen();
-    if (configDirty || !state?.engine?.tracking) {
-      await post("/api/config", configPayload());
-      configDirty = false;
-    }
-    if (!state?.engine?.tracking) {
-      await post("/api/tracking/start");
-    }
-    await refreshStatus();
-  } catch (error) {
-    if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
-    throw error;
-  } finally {
-    actionBusy = false;
-    refreshStatus();
-  }
-}
-
-async function sampleTarget() {
-  if (!calibration.active || calibration.busy) return;
-  calibration.busy = true;
-  $("calibrationTarget").classList.add("collecting");
-  const phase = calibration.phase;
-  const isPose = phase === "head_pose";
-  const isLight = phase === "light_anchor";
-  const isQuickLight = phase === "light_adaptation";
-  const list = isPose ? calibration.poseTargets : (isLight ? calibration.lightTargets : calibration.targets);
-  const index = isPose ? calibration.poseIndex : (isLight ? calibration.lightIndex : calibration.index);
-  const target = list[index];
-  $("calibrationMessage").textContent = isPose
-    ? ((index + 1) + "/" + list.length + " · 正在采集固定头姿下的眼动")
-    : ((index + 1) + "/" + list.length + " · 正在采集" + ((isLight || isQuickLight) ? "光照锚点" : "静态眼动"));
-  try {
-    if (isPose) {
-      const result = await post("/api/calibration/pose", { index });
-      calibration.poseIndex = result.pose_index;
-      if (calibration.poseIndex >= calibration.poseTargets.length) {
-        $("calibrationTarget").hidden = true;
-        $("calibrationMessage").textContent = "正在训练 O/N 两套 CNN";
-        const finished = await post("/api/calibration/finish");
-        await closeCalibration(false);
-        if (finished.requires_lighting_profile_selection) {
-          calibration.active = true;
-          calibration.phase = "lighting_profile_selection";
-          showLightingProfileSelection(finished.available_lighting_profiles || []);
-        } else {
-          toast("新校准数据已训练并保存");
-          await refreshStatus();
-        }
-      } else {
-        showCalibrationTarget();
-      }
-    } else {
-      const profile = target.lighting || {};
-      const animation = animateCalibrationLight(profile);
-      const result = await post("/api/calibration/sample", { index });
-      await animation;
-      if (isLight) calibration.lightIndex = result.light_index;
-      else calibration.index = result.index;
-      calibration.phase = result.phase || phase;
-      if (isQuickLight && calibration.index >= calibration.targets.length) {
-        $("calibrationTarget").hidden = true;
-        $("calibrationMessage").textContent = "正在训练光照适配器";
-        const finished = await post("/api/calibration/finish");
-        await closeCalibration(false);
-        await refreshStatus();
-        setLightingProfileSelection(finished.profile_name);
-        await post("/api/config", configPayload());
-        toast(`光照配置 ${finished.profile_name} 已保存`);
-        await refreshStatus();
-        return;
-      }
-      if (calibration.phase === "light_anchor" && !isLight) calibration.lightIndex = 0;
-      if (calibration.phase === "head_pose") {
-        calibration.poseIndex = 0;
-        showCalibrationTarget();
-      } else {
-        showCalibrationTarget();
-      }
-    }
-  } catch (error) {
-    $("calibrationMessage").textContent = `采集失败 · ${error.message}`;
-    $("calibrationTarget").classList.remove("collecting");
-  } finally {
-    calibration.busy = false;
-  }
-}
-
-async function closeCalibration(cancel = true) {
-  if (cancel && calibration.active) await post("/api/calibration/cancel").catch(() => {});
-  calibration.active = false;
-  calibration.phase = "idle";
-  $("calibrationOverlay").hidden = true;
-  $("calibrationOverlay").style.backgroundColor = "#050605";
-  $("calibrationTarget").hidden = false;
-  if (document.fullscreenElement) await document.exitFullscreen().catch(() => {});
-}
-
 function placeDot(element, point, gaze) {
-  if (!point || !gaze.valid) { element.hidden = true; return; }
+  if (!point || !gaze.valid || !state) { element.hidden = true; return; }
   element.hidden = false;
-  element.style.left = `${point[0] / Math.max(1, state.config.screen_width - 1) * 100}%`;
-  element.style.top = `${point[1] / Math.max(1, state.config.screen_height - 1) * 100}%`;
+  element.style.left = point[0] / Math.max(1, state.config.screen_width - 1) * 100 + "%";
+  element.style.top = point[1] / Math.max(1, state.config.screen_height - 1) * 100 + "%";
 }
-
 function renderGaze(gaze) {
-  placeDot($("rightDot"), gaze.right, gaze);
-  placeDot($("leftDot"), gaze.left, gaze);
+  if (applicationClosed) return;
   placeDot($("combinedDot"), gaze.combined, gaze);
   const now = performance.now();
   gazeArrivalTimes.push(now);
-  gazeArrivalTimes = gazeArrivalTimes.filter((value) => value >= now - 1000);
-  const gazeFps = gazeArrivalTimes.length >= 2
-    ? (gazeArrivalTimes.length - 1) * 1000 / (gazeArrivalTimes[gazeArrivalTimes.length - 1] - gazeArrivalTimes[0])
-    : 0;
-  const waitingMessage = state?.engine?.input?.error
-    || describeRuntimeError(gaze.error || state?.engine?.error)
-    || (state?.engine?.tracking ? "等待有效注视输出" : "等待启动");
-  const extrapolation = gaze.postprocess?.extrapolation_state;
-  if (gaze.postprocess) {
-    const filterText = gaze.postprocess.one_euro ? "稳定 A 开启" : "稳定 A 关闭";
-    const extrapolationText = gaze.postprocess.extrapolation
-      ? `补偿 B ${Number(gaze.postprocess.extrapolation_horizon_ms || 0).toFixed(0)} ms`
-      : "补偿 B 关闭";
-    $("previewPostprocess").textContent = `${filterText} · ${extrapolationText}`;
-  }
-  const modeLabels = {
-    fixation: "固定注视 · 不外推",
-    continuous_motion: "连续运动 · 短期外推",
-    jump_or_landing: "跳变/落地 · 跟随最新点",
-    disabled: "外推未启用",
+  gazeArrivalTimes = gazeArrivalTimes.filter(value => value >= now - 1000);
+  const fps = gazeArrivalTimes.length > 1 ? (gazeArrivalTimes.length - 1) * 1000 / (now - gazeArrivalTimes[0]) : 0;
+  $("previewState").textContent = gaze.valid ? fps.toFixed(1) + " FPS · " + Number(gaze.processing_ms || 0).toFixed(1) + " ms"
+    : describeRuntimeError(gaze.error) || tr("等待有效注视输出", "Waiting for valid gaze");
+  const modes = {
+    event_fixation: ["注视 · 自动稳定", "Fixation · automatic stability"],
+    event_pursuit: ["追视 · 跟随观测", "Pursuit · following observed motion"],
+    event_saccade_observed: ["眼跳 · 跟随观测", "Saccade · following observed motion"],
+    event_saccade_velocity_prediction: ["眼跳 · 短时预测", "Saccade · short-horizon prediction"],
+    event_saccade_landing_prediction: ["眼跳 · 落点预测", "Saccade · landing prediction"],
+    event_landing: ["落定 · 恢复稳定", "Landing · resuming stability"]
   };
-  $("previewMotionMode").textContent = `模式 ${modeLabels[extrapolation?.mode] || "等待"}`;
-  $("previewState").textContent = gaze.valid
-    ? `${gazeFps.toFixed(1)} FPS · 推理 ${Number(gaze.processing_ms || 0).toFixed(1)} ms`
-    : waitingMessage;
+  const mode = gaze.postprocess?.extrapolation_state?.mode;
+  $("previewMotionMode").textContent = modes[mode] ? tr(...modes[mode]) : "";
+  renderPerformance(gaze.performance, gaze.output_seq);
 }
-
 function startGazeStream() {
-  if (gazeStream) return;
-  gazeArrivalTimes = [];
-  const stream = new EventSource("/api/gaze/stream");
+  const include = activePage === "performance";
+  if (gazeStream && gazeStreamIncludesPerformance === include) return;
+  stopGazeStream();
+  const stream = new EventSource("/api/gaze/stream?performance=" + (include ? "1" : "0"));
   gazeStream = stream;
-  stream.onmessage = (event) => {
+  gazeStreamIncludesPerformance = include;
+  stream.onmessage = event => {
     if (stream !== gazeStream) return;
-    try { renderGaze(JSON.parse(event.data)); }
-    catch (error) { $("previewState").textContent = `注视数据错误 · ${error.message}`; }
+    try { renderGaze(JSON.parse(event.data)); } catch (_) { /* A malformed frame must not break the stream. */ }
   };
   stream.onerror = () => {
-    if (stream === gazeStream && activePage === "preview") {
-      $("previewState").textContent = "注视数据连接中断";
-    }
+    if (stream !== gazeStream) return;
+    $("previewState").textContent = tr("数据连接中断，正在重连", "Data interrupted; reconnecting");
+    $("latencyLiveState").textContent = tr("正在重连", "Reconnecting");
+    $("latencyLiveState").classList.remove("live");
   };
 }
-
 function stopGazeStream() {
-  if (!gazeStream) return;
-  const stream = gazeStream;
+  gazeStream?.close();
   gazeStream = null;
-  stream.close();
   gazeArrivalTimes = [];
 }
-
-document.querySelectorAll(".nav-button").forEach((button) => button.addEventListener("click", () => setPage(button.dataset.page)));
-$("pairingCandidates").addEventListener("click", (event) => {
+const latencyStages = [
+  ["phone_capture_to_send_ms", "手机采集 → 发包", "Phone capture → send"],
+  ["transport_to_first_packet_ms", "发送 → 首包（估计）", "Send → first packet (estimate)"],
+  ["receive_decode_ms", "接收与解码（以下三项小计）", "Receive & decode (subtotal of next three)"],
+  ["packet_assembly_ms", "　收齐分包", "　Packet assembly"],
+  ["decode_queue_ms", "　等待解码", "　Decode queue"],
+  ["jpeg_decode_ms", "　解码与旋转", "　Decode & rotate"],
+  ["pc_queue_ms", "等待电脑处理", "PC processing queue"],
+  ["face_landmarks_ms", "人脸关键点", "Face landmarks"],
+  ["eye_normalization_ms", "眼部归一化", "Eye normalization"],
+  ["backend_overhead_ms", "视觉后端其他", "Vision backend overhead"],
+  ["gaze_model_ms", "注视模型", "Gaze model"],
+  ["projection_fusion_ms", "投影与双眼融合", "Projection & eye fusion"],
+  ["prediction_postprocess_ms", "自动稳定与眼跳预测", "Automatic stability & saccade prediction"],
+  ["shared_memory_write_ms", "写入共享内存", "Shared memory write"],
+  ["other_processing_ms", "其他处理", "Other processing"]
+];
+function latencyText(value) {
+  return value != null && Number.isFinite(Number(value)) ? Number(value).toFixed(2) + " ms" : "—";
+}
+function drawLatencyChart() {
+  if (activePage !== "performance") return;
+  const canvas = $("latencyChart"), width = Math.max(240, canvas.clientWidth || 900), height = Math.max(150, canvas.clientHeight || 205);
+  const ratio = Math.max(1, window.devicePixelRatio || 1);
+  canvas.width = Math.round(width * ratio); canvas.height = Math.round(height * ratio);
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  const left = 56, top = 12, pw = width - left - 10, ph = height - 36;
+  const values = latencyHistory.flatMap(item => [item.total, item.sum]).filter(Number.isFinite);
+  const max = Math.max(20, Math.ceil(Math.max(...values, 20) * 1.1 / 10) * 10);
+  context.font = "12px Segoe UI";
+  for (let i = 0; i <= 4; i++) {
+    const y = top + ph * i / 4;
+    context.strokeStyle = "#344039"; context.lineWidth = 1;
+    context.beginPath(); context.moveTo(left, y); context.lineTo(width - 10, y); context.stroke();
+    context.fillStyle = "#a2b0a7"; context.textAlign = "right";
+    context.fillText((max * (1 - i / 4)).toFixed(0) + " ms", left - 8, y + 4);
+  }
+  for (const [field, color] of [["total", "#79d4a0"], ["sum", "#e6bf73"]]) {
+    context.strokeStyle = color; context.lineWidth = 1.7; context.beginPath();
+    let drawing = false;
+    latencyHistory.forEach((item, i) => {
+      if (!Number.isFinite(item[field])) { drawing = false; return; }
+      const x = left + pw * i / Math.max(1, latencyHistory.length - 1), y = top + ph * (1 - item[field] / max);
+      if (drawing) context.lineTo(x, y); else context.moveTo(x, y);
+      drawing = true;
+    });
+    context.stroke();
+  }
+}
+function renderPerformance(data, sequence = null) {
+  if (data?.schema === "opengazelink-live-latency-v1") lastPerformance = data;
+  if (activePage !== "performance") return;
+  data = lastPerformance || {};
+  const current = data.current || {}, metric = field => data.metrics?.[field] || {};
+  const total = metric("source_to_shared_memory_ms_proxy"), processing = metric("pc_processing_ms");
+  $("latencyEndToEnd").textContent = latencyText(current.source_to_shared_memory_ms_proxy);
+  $("latencyEndToEndStats").textContent = tr("均值 ", "Mean ") + latencyText(total.mean) + " · P95 " + latencyText(total.p95);
+  $("latencyStageSum").textContent = latencyText(current.stage_sum_ms);
+  $("latencyToDisplay").textContent = latencyText(current.source_to_display_ms_estimate);
+  $("latencyProcessing").textContent = latencyText(current.pc_processing_ms);
+  $("latencyProcessingStats").textContent = tr("均值 ", "Mean ") + latencyText(processing.mean) + " · P95 " + latencyText(processing.p95);
+  $("latencySumCheck").textContent = tr("与全流程差 ", "Difference from total: ") + latencyText(current.sum_error_ms);
+  $("latencyDisplayNote").textContent = tr("含显示预算 ", "Includes display budget: ") + latencyText(current.display_delay_ms_assumed);
+  $("latencySamples").textContent = Number(data.sample_count || 0) + tr(" 个样本 · 后台每秒汇总", " samples · aggregated each second");
+  $("latencyWindow").textContent = Number(data.window_seconds || 30) + " s";
+  $("latencyHorizon").textContent = latencyText(current.prediction_horizon_ms);
+  $("latencyDisplayBudget").textContent = latencyText(current.display_delay_ms_assumed);
+  const probe = current.clock_basis === "phone_roundtrip_alignment", local = current.clock_basis === "camera_read_completion_proxy";
+  $("latencyBasis").textContent = probe ? tr("双向探测校时", "Round-trip clock alignment")
+    : local ? tr("以电脑读帧完成时刻为基准", "PC frame-read completion reference")
+    : current.clock_basis === "phone_minimum_transit_proxy" ? tr("最小传输时间代理", "Minimum-transit proxy") : tr("时间基准尚不可用", "Timing reference unavailable");
+  $("latencyMeasurementNote").textContent = probe
+    ? tr("最近探测 RTT ", "Latest probe RTT ") + latencyText(current.clock_probe_rtt_ms) + tr("，校时不确定度约 ±", ", alignment uncertainty approximately ±") +
+      latencyText(current.clock_probe_uncertainty_ms) + tr("。路径不对称与设备调度会影响单向延迟估算。显示预算不是实测。", ". Path asymmetry and scheduling affect one-way estimates. Display budget is not a measurement.")
+    : local ? tr("不包含驱动缓存、曝光和真正显示出光。", "Excludes driver buffering, exposure and actual display emission.")
+    : tr("手机与电脑没有共同时钟；代理值可能偏低，无法单独识别固定网络延迟。", "Phone and PC clocks differ. Proxy values may be low and cannot isolate fixed network latency.");
+  $("latencyStageRows").innerHTML = latencyStages.map(([field, zh, en]) =>
+    "<tr><td>" + tr(zh, en) + "</td>" + [current[field], metric(field).mean, metric(field).p95, metric(field).max].map(v => "<td>" + latencyText(v) + "</td>").join("") + "</tr>"
+  ).join("");
+  const live = Boolean(state?.engine?.tracking && data.sample_count);
+  $("latencyLiveState").classList.toggle("live", live);
+  $("latencyLiveState").textContent = live ? tr("实时统计", "Live") : tr("等待有效输出", "Waiting for output");
+  if (sequence != null && sequence !== lastLatencySequence) {
+    lastLatencySequence = sequence;
+    latencyHistory.push({ total: current.source_to_shared_memory_ms_proxy, sum: current.stage_sum_ms });
+    if (latencyHistory.length > 180) latencyHistory.shift();
+  }
+  drawLatencyChart();
+}
+async function runAction(action) {
+  if (actionBusy) return;
+  actionBusy = true;
+  if (state) renderStatus(state);
+  try { await action(); } catch (error) { toast(error.message); }
+  finally { actionBusy = false; if (!applicationClosed) await refreshStatus(); }
+}
+function leaveApplication(heading, detail) {
+  applicationClosed = true;
+  clearTimeout(statusTimer);
+  stopGazeStream(); stopFrameStream();
+  document.body.replaceChildren();
+  const main = document.createElement("main"); main.className = "background-confirmation";
+  const h1 = document.createElement("h1"); h1.textContent = heading;
+  const p = document.createElement("p"); p.textContent = detail;
+  main.append(h1, p); document.body.append(main);
+}
+document.querySelectorAll(".nav-button").forEach(button => button.addEventListener("click", () => setPage(button.dataset.page)));
+$("language").addEventListener("change", () => applyLanguage($("language").value));
+document.addEventListener("languagechange", () => { if (state) renderStatus(state); });
+for (const type of ["input", "change"]) $("configForm").addEventListener(type, () => {
+  configDirty = true;
+  $("windowsCameraSettings").hidden = $("inputSource").value !== "windows_camera";
+  renderConfigApplyStatus();
+});
+$("saveConfigButton").addEventListener("click", () => runAction(async () => { await saveConfig(); toast(tr("设置已保存并应用", "Settings saved and applied")); }));
+$("refreshWindowsCamerasButton").addEventListener("click", () => refreshWindowsCameras().catch(error => toast(error.message)));
+$("pairingCandidates").addEventListener("click", event => {
   const button = event.target.closest("[data-accept-phone]");
-  if (!button) return;
-  post("/api/pairing/accept", { phone_id: button.dataset.acceptPhone })
-    .then(refreshStatus)
-    .catch((error) => toast(error.message));
+  if (button) runAction(() => post("/api/pairing/accept", { phone_id: button.dataset.acceptPhone }));
 });
 $("forgetPairingButton").addEventListener("click", () => {
-  post("/api/pairing/forget").then(refreshStatus).catch((error) => toast(error.message));
-});
-$("lightingProfile").addEventListener("change", () => setLightingProfileSelection($("lightingProfile").value));
-$("calibrationLightingProfile").addEventListener("change", () => setLightingProfileSelection($("calibrationLightingProfile").value));
-$("lightingProfileItems").addEventListener("click", (event) => {
-  const button = event.target.closest("[data-delete-profile]");
-  if (button) deleteLightingProfile(button.dataset.deleteProfile).catch((error) => toast(error.message));
-});
-$("configForm").addEventListener("input", () => { configDirty = true; renderConfigApplyStatus(); });
-$("configForm").addEventListener("change", () => { configDirty = true; renderConfigApplyStatus(); });
-$("saveConfigButton").addEventListener("click", async () => {
-  try {
-    await post("/api/config", configPayload());
-    configDirty = false;
-    toast("配置已保存并立即应用");
-    await refreshStatus();
-  } catch (error) { toast(error.message); }
-});
-$("refreshWindowsCamerasButton").addEventListener("click", () => {
-  refreshWindowsCameras().catch((error) => toast(error.message));
-});
-$("applyWindowsCameraButton").addEventListener("click", async () => {
-  const button = $("applyWindowsCameraButton");
-  const originalText = button.textContent;
-  button.disabled = true;
-  button.textContent = "正在打开摄像头...";
-  try {
-    await post("/api/config", configPayload());
-    configDirty = false;
-    toast("摄像头设置已保存并应用");
-    await refreshStatus();
-  } catch (error) {
-    toast(error.message);
-  } finally {
-    button.disabled = false;
-    button.textContent = originalText;
+  if (confirm(tr("解除手机配对？传输中的手机需要重新连接。", "Unpair this phone? An active phone stream will need to reconnect."))) {
+    runAction(() => post("/api/pairing/forget"));
   }
 });
-$("startButton").addEventListener("click", async () => {
-  try {
-    await post("/api/config", configPayload());
-    configDirty = false;
-    await post("/api/tracking/start");
-    await refreshStatus();
-  } catch (error) { toast(error.message); }
+$("startButton").addEventListener("click", () => runAction(async () => { await saveConfig(); await post("/api/tracking/start"); }));
+$("stopButton").addEventListener("click", () => runAction(() => post("/api/tracking/stop")));
+$("backgroundButton").addEventListener("click", () => runAction(async () => {
+  await saveConfig(); await post("/api/application/background");
+  leaveApplication(tr("正在后台运行", "Running in background"), tr("可以关闭此页面。再次打开控制中心即可恢复。", "You can close this page. Open the control center to return."));
+}));
+$("exitButton").addEventListener("click", () => runAction(async () => {
+  await post("/api/application/exit");
+  leaveApplication(tr("OpenGazeLink 已退出", "OpenGazeLink has exited"), tr("现在可以关闭此页面。", "You can close this page."));
+}));
+$("previewStartButton").addEventListener("click", () => {
+  if (document.fullscreenElement === $("previewPage")) { document.exitFullscreen().catch(error => toast(error.message)); return; }
+  // Request fullscreen in the click gesture, before asynchronous network calls.
+  const fullscreen = $("previewPage").requestFullscreen();
+  runAction(async () => {
+    try {
+      await fullscreen;
+      if (!state?.engine?.tracking) { await saveConfig(); await post("/api/tracking/start"); }
+    } catch (error) {
+      if (document.fullscreenElement === $("previewPage")) await document.exitFullscreen();
+      throw error;
+    }
+  });
 });
-$("stopButton").addEventListener("click", async () => { await post("/api/tracking/stop"); await refreshStatus(); });
-$("exitButton").addEventListener("click", async () => {
-  try {
-    await post("/api/application/exit");
-    document.body.innerHTML = '<main class="background-confirmation"><h1>OpenGazeLink 已退出</h1><p>现在可以关闭此页面。</p></main>';
-  } catch (error) {
-    toast(error.message);
-  }
-});
-$("backgroundButton").addEventListener("click", async () => {
-  try {
-    await post("/api/config", configPayload());
-    configDirty = false;
-    await post("/api/application/background");
-    document.body.innerHTML = '<main class="background-confirmation"><h1>OpenGazeLink 已转入后台运行</h1><p>可以关闭此页面。再次打开“OpenGazeLink 控制中心”即可恢复控制页面。</p></main>';
-  } catch (error) {
-    toast(error.message);
-  }
-});
-$("previewStartButton").addEventListener("click", () => startPreview().catch((error) => toast(error.message)));
-$("startCalibrationButton").addEventListener("click", () => startCalibration().catch((error) => toast(error.message)));
-$("startLightingAdaptationButton").addEventListener("click", () => startLightingAdaptation().catch((error) => toast(error.message)));
-$("applyLightingProfileButton").addEventListener("click", () => applyLightingProfile().catch((error) => toast(error.message)));
-$("completeLightingSelectionButton").addEventListener("click", () => completeLightingProfileSelection().catch((error) => toast(error.message)));
-$("abandonCalibrationButton").addEventListener("click", () => abandonPendingCalibration().catch((error) => toast(error.message)));
-$("calibrationTarget").addEventListener("click", sampleTarget);
-$("cancelCalibrationButton").addEventListener("click", () => closeCalibration(true));
-document.addEventListener("fullscreenchange", () => { if (!document.fullscreenElement && calibration.active) closeCalibration(true); });
+$("cameraFrame").addEventListener("error", stopFrameStream);
 document.addEventListener("fullscreenchange", () => { if (activePage === "preview") refreshStatus(); });
 document.addEventListener("visibilitychange", () => {
-  syncStreams();
-  if (document.hidden) {
-    window.clearTimeout(statusTimer);
-    statusTimer = 0;
-  } else {
-    refreshStatus();
-  }
+  syncStreams(); clearTimeout(statusTimer);
+  if (!document.hidden) refreshStatus();
 });
-
+window.addEventListener("resize", drawLatencyChart);
+applyLanguage(language);
 refreshStatus();

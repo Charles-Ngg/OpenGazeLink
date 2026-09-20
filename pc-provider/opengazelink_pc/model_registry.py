@@ -9,6 +9,9 @@ from .shared_eye_models import (
     SHARED_DATASET_SCHEMA,
     SharedTinyCnnModel,
 )
+from .conditioned_eye_model import (
+    CONDITIONED_EYE_SCHEMA, CONDITIONED_VARIANTS, ConditionedEyeModel,
+)
 from .paths import DATA_DIR
 
 MODEL_PATHS = {
@@ -26,11 +29,21 @@ DATASET_PATHS = {
     "legacy": DATA_DIR / "shared-eye-legacy-angle-calibration.json",
 }
 
+CONDITIONED_MODEL_PATH = DATA_DIR / "conditioned-eye-model.json"
+BINOCULAR_MODEL_PATH = DATA_DIR / "conditioned-binocular-model.json"
+VIDEO_MODEL_PATH = DATA_DIR / "conditioned-video-model.json"
+
+
+def conditioned_model_path(variant):
+    if variant == "conditioned_video":
+        return VIDEO_MODEL_PATH
+    return BINOCULAR_MODEL_PATH if variant == "conditioned_binocular" else CONDITIONED_MODEL_PATH
+
 
 class ModelRegistry:
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._cache: dict[str, SharedTinyCnnModel] = {}
+        self._cache: dict[tuple[str, str], SharedTinyCnnModel | ConditionedEyeModel] = {}
         self._status_cache: dict | None = None
 
     def clear(self) -> None:
@@ -38,17 +51,25 @@ class ModelRegistry:
             self._cache.clear()
             self._status_cache = None
 
-    def load(self, landmarker: str) -> SharedTinyCnnModel:
-        key = landmarker
+    def load(
+        self, landmarker: str, gaze_model: str = "calibrated",
+    ) -> SharedTinyCnnModel | ConditionedEyeModel:
+        key = (landmarker, gaze_model)
         with self._lock:
             cached = self._cache.get(key)
             if cached is not None:
                 return cached
-            metadata_path, module_path = MODEL_PATHS[key]
-            model = SharedTinyCnnModel.load(metadata_path, module_path)
+            if gaze_model in CONDITIONED_VARIANTS:
+                if landmarker != "tasks":
+                    raise ValueError("conditioned-eye A/B models require the Tasks landmarker")
+                path = conditioned_model_path(gaze_model)
+                model = ConditionedEyeModel.load(path, gaze_model)
+            else:
+                metadata_path, module_path = MODEL_PATHS[landmarker]
+                model = SharedTinyCnnModel.load(metadata_path, module_path)
             if model.landmarker_backend != landmarker:
                 raise ValueError(
-                    f"{metadata_path.name} was trained with {model.landmarker_backend}, not {landmarker}"
+                    f"model was trained with {model.landmarker_backend}, not {landmarker}"
                 )
             self._cache[key] = model
             return model
@@ -102,6 +123,50 @@ class ModelRegistry:
                 except Exception as error:
                     item.update({"ready": False, "compatible": False, "error": str(error)})
             models[key] = item
+
+        for variant in CONDITIONED_VARIANTS:
+            metadata_path = conditioned_model_path(variant)
+            conditioned_metadata = None
+            if metadata_path.is_file():
+                try:
+                    conditioned_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                except Exception as error:
+                    conditioned_metadata = {"error": str(error)}
+            item = {
+                "landmarker": "tasks", "model": variant,
+                "ready": False, "compatible": False,
+                "files": [str(metadata_path)],
+            }
+            payload = (conditioned_metadata or {}).get("variants", {}).get(variant, {})
+            module_file = payload.get("module_file")
+            module_path = metadata_path.with_name(module_file) if module_file else None
+            if module_path is not None:
+                item["files"].append(str(module_path))
+            present = metadata_path.is_file() and module_path is not None and module_path.is_file()
+            if present and conditioned_metadata.get("schema") == CONDITIONED_EYE_SCHEMA:
+                item.update({
+                    "ready": True, "compatible": True,
+                    "schema": conditioned_metadata.get("schema"),
+                    "expected_schema": CONDITIONED_EYE_SCHEMA,
+                    "trained_backend": (conditioned_metadata.get("preprocessing") or {}).get("landmarker_backend"),
+                    "screen": conditioned_metadata.get("screen"),
+                    "screen_diagonal_inches": conditioned_metadata.get("screen_diagonal_inches"),
+                    "camera_position_screen_cm": conditioned_metadata.get("camera_position_screen_cm"),
+                    "screen_camera_origin_cm": conditioned_metadata.get("screen_camera_origin_cm"),
+                    "input_source": conditioned_metadata.get("input_source", "phone_udp"),
+                    "windows_camera": conditioned_metadata.get("windows_camera"),
+                    "parameters": payload.get("parameters"),
+                    "checkpoint_bytes": payload.get("checkpoint_bytes"),
+                    "uses_iris_points": payload.get("uses_iris_points"),
+                    "created_at": conditioned_metadata.get("created_at"),
+                    "lighting_profiles": [],
+                })
+            elif conditioned_metadata and conditioned_metadata.get("error"):
+                item["error"] = conditioned_metadata["error"]
+            elif not present:
+                missing = [str(value) for value in (metadata_path, module_path) if value is not None and not value.is_file()]
+                item["error"] = "missing model file: " + ", ".join(missing)
+            models[f"tasks_{variant}"] = item
 
         datasets = {}
         for landmarker, path in DATASET_PATHS.items():

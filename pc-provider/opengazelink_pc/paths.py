@@ -55,6 +55,12 @@ _ACTIVE_DATA_FILES = (
     "shared-eye-cnn-module.pt",
     "shared-eye-legacy-cnn-model.json",
     "shared-eye-legacy-cnn-module.pt",
+    "conditioned-eye-model.json",
+    "conditioned-eye-with-iris.pt",
+    "conditioned-eye-without-iris.pt",
+    "conditioned-binocular-model.json",
+    "conditioned-eye-binocular.pt",
+    "conditioned-video-model.json",
 )
 
 

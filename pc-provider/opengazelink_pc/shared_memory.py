@@ -4,6 +4,7 @@ import mmap
 import struct
 import threading
 import time
+from . import runtime_clock
 from dataclasses import dataclass
 from typing import Optional
 
@@ -52,7 +53,7 @@ class GazeSharedMemoryWriter:
     def write_invalid(self, width: float = 0.0, height: float = 0.0) -> None:
         self.write(
             GazeSample(
-                t_ms=time.monotonic() * 1000.0,
+                t_ms=runtime_clock.monotonic() * 1000.0,
                 x=0.0,
                 y=0.0,
                 raw_x=0.0,
@@ -76,7 +77,7 @@ class GazeSharedMemoryWriter:
             self._seq = next_seq
             buffer = bytearray(SLOT_SIZE)
             struct.pack_into("<IIII", buffer, 0, MAGIC, VERSION, next_seq, 1 if gaze.valid else 0)
-            struct.pack_into("<d", buffer, 16, time.monotonic() * 1000.0)
+            struct.pack_into("<d", buffer, 16, runtime_clock.monotonic() * 1000.0)
             struct.pack_into("<ffff", buffer, 24, float(gaze.x), float(gaze.y), float(width), float(height))
             struct.pack_into("<f", buffer, 40, float(gaze.confidence))
             struct.pack_into("<f", buffer, 44, 0.0)

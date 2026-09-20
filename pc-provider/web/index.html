@@ -3,235 +3,174 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>OpenGazeLink Control</title>
+  <title>OpenGazeLink</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">OpenGazeLink</div>
-    <div class="top-status"><span id="cameraDot" class="status-dot"></span><span id="cameraSummary">等待相机输入</span></div>
-    <div class="top-status"><span id="runtimeDot" class="status-dot"></span><span id="runtimeSummary">未运行</span></div>
+    <div class="brand">OpenGazeLink <span data-zh="控制中心" data-en="Control center">控制中心</span></div>
+    <div class="top-status"><span id="runtimeDot" class="status-dot"></span><span id="runtimeSummary" role="status"></span></div>
+    <label class="language-label"><span data-zh="语言" data-en="Language">语言</span>
+      <select id="language" aria-label="Language / 语言"><option value="zh">中文</option><option value="en">English</option></select>
+    </label>
   </header>
-
   <div class="shell">
-    <nav class="sidebar" aria-label="主导航">
-      <button class="nav-button active" data-page="control">控制台</button>
-      <button class="nav-button" data-page="calibration">校准</button>
-      <button class="nav-button" data-page="preview">注视预览</button>
+    <nav class="sidebar" aria-label="Navigation / 导航">
+      <button class="nav-button active" data-page="control" data-zh="连接与运行" data-en="Connect & run">连接与运行</button>
+      <button class="nav-button" data-page="calibration" data-zh="校准" data-en="Calibration">校准</button>
+      <button class="nav-button" data-page="preview" data-zh="注视预览" data-en="Gaze preview">注视预览</button>
+      <button class="nav-button" data-page="performance" data-zh="性能" data-en="Performance">性能</button>
     </nav>
-
     <main>
       <section id="controlPage" class="page active">
         <div class="page-heading">
-          <div><h1>运行控制</h1><p id="runtimeDetail">共享内存尚未启动</p></div>
+          <div><h1 data-zh="连接与运行" data-en="Connect & run">连接与运行</h1><p id="runtimeDetail" role="status"></p></div>
           <div class="command-row">
-            <button id="stopButton" class="button secondary">停止</button>
-            <button id="exitButton" class="button secondary">退出程序</button>
-            <button id="backgroundButton" class="button secondary">转入后台</button>
-            <button id="startButton" class="button primary" disabled>启动</button>
+            <button id="stopButton" class="button secondary" disabled data-zh="停止" data-en="Stop">停止</button>
+            <button id="startButton" class="button primary" disabled data-zh="启动追踪" data-en="Start tracking">启动追踪</button>
           </div>
         </div>
-
-        <section id="firstRunPanel" class="panel status-panel">
-          <div class="panel-heading"><h2>首次使用</h2><span>完成后可直接后台运行</span></div>
-          <div class="artifact-grid">
-            <div id="setupPairing" class="artifact missing"><strong>1. 手机连接</strong><span>等待自动配对或手动地址</span></div>
-            <div id="setupCamera" class="artifact missing"><strong>2. 画面与内参</strong><span>等待手机开始传输</span></div>
-            <div id="setupGeometry" class="artifact missing"><strong>3. 屏幕与相机位置</strong><span>填写并保存运行配置</span></div>
-            <div id="setupModel" class="artifact missing"><strong>4. 注视模型</strong><span>完成首次完整校准</span></div>
-          </div>
-        </section>
-
+        <div id="firstRunPanel" class="setup-banner" role="status"></div>
         <div class="dashboard-grid">
-          <section class="panel camera-panel">
-            <div class="panel-heading"><h2>相机画面</h2><span id="frameRate">- FPS</span></div>
-            <div id="cameraStage" class="camera-stage"><span id="cameraPlaceholder">等待相机画面</span><img id="cameraFrame" alt="相机画面" hidden></div>
-          </section>
-
-          <section class="panel">
-            <div class="panel-heading"><h2>运行配置</h2><span id="selectionLabel">O Legacy + CNN</span></div>
+          <div class="camera-column">
+            <section class="panel">
+              <div class="panel-heading"><h2 data-zh="相机画面" data-en="Camera view">相机画面</h2><span id="frameRate">— FPS</span></div>
+              <div id="cameraStage" class="camera-stage"><span id="cameraPlaceholder" data-zh="连接相机后，这里会显示完整画面" data-en="Connect a camera to see the full frame">连接相机后，这里会显示完整画面</span><img id="cameraFrame" alt="Camera frame / 相机画面" hidden></div>
+              <p id="cameraSummary" class="panel-note"></p>
+            </section>
+            <section id="pairingPanel" class="panel">
+              <div class="panel-heading"><h2 data-zh="手机连接" data-en="Phone connection">手机连接</h2><span id="pairingSummary"></span></div>
+              <p id="pairingDetail" class="panel-note"></p>
+              <div id="pairingCandidates" class="pairing-items"></div>
+              <div class="panel-actions"><button id="forgetPairingButton" class="button secondary" disabled data-zh="解除配对" data-en="Unpair phone">解除配对</button></div>
+            </section>
+            <details class="panel">
+              <summary data-zh="相机内参" data-en="Camera intrinsics">相机内参</summary>
+              <p id="intrinsicsSource" class="panel-note"></p><dl id="intrinsicsGrid" class="metric-grid"></dl>
+            </details>
+          </div>
+          <section class="panel settings-panel">
+            <div class="panel-heading"><h2 data-zh="运行设置" data-en="Run settings">运行设置</h2><span data-zh="当前预训练模型" data-en="Current pretrained model">当前预训练模型</span></div>
             <form id="configForm" class="config-form">
               <section class="config-section">
-                <div class="config-section-heading"><h3>模型与光照</h3><span>决定输入特征和当前适配层</span></div>
-                <div class="config-fields">
-                  <fieldset>
-                    <legend>人脸模型</legend>
-                    <div class="segmented">
-                      <label><input type="radio" name="landmarker" value="legacy"><span>O Legacy</span></label>
-                      <label><input type="radio" name="landmarker" value="tasks"><span>N Tasks</span></label>
-                    </div>
-                  </fieldset>
-                  <label>当前光照预设
-                    <select id="lightingProfile">
-                      <option value="reference">参考光照</option>
-                      <option value="dark">暗光</option>
-                      <option value="bright">亮光</option>
-                    </select>
-                  </label>
+                <h3 data-zh="画面来源" data-en="Camera source">画面来源</h3>
+                <label><span data-zh="输入设备" data-en="Input device">输入设备</span>
+                  <select id="inputSource"><option value="phone_udp" data-zh="手机" data-en="Phone">手机</option><option value="windows_camera" data-zh="电脑摄像头" data-en="PC camera">电脑摄像头</option></select>
+                </label>
+                <p class="field-help" data-zh="手机端选择模式和分辨率，电脑接收完整画面。" data-en="Choose mode and resolution on the phone. The PC receives the full frame.">手机端选择模式和分辨率，电脑接收完整画面。</p>
+                <div id="windowsCameraSettings" class="config-fields" hidden>
+                  <label class="wide"><span data-zh="摄像头" data-en="Camera">摄像头</span><select id="windowsCameraIndex"><option value="0">Camera 0</option></select></label>
+                  <label><span data-zh="宽度（像素）" data-en="Width (px)">宽度（像素）</span><input id="windowsCameraWidth" type="number" min="320" max="4096"></label>
+                  <label><span data-zh="高度（像素）" data-en="Height (px)">高度（像素）</span><input id="windowsCameraHeight" type="number" min="240" max="4096"></label>
+                  <label><span data-zh="目标帧率" data-en="Target FPS">目标帧率</span><input id="windowsCameraFps" type="number" min="1" max="120"></label>
+                  <label><span data-zh="水平视场角（°）" data-en="Horizontal field of view (°)">水平视场角（°）</span><input id="windowsCameraFov" type="number" min="20" max="140" step="0.1"></label>
+                  <p class="field-help wide" data-zh="电脑摄像头内参由视场角估算；更换设备或分辨率后请重新校准。" data-en="PC camera intrinsics are estimated from field of view. Recalibrate after changing camera or resolution.">电脑摄像头内参由视场角估算；更换设备或分辨率后请重新校准。</p>
+                  <button id="refreshWindowsCamerasButton" class="button secondary wide" type="button" data-zh="查找摄像头" data-en="Find cameras">查找摄像头</button>
                 </div>
               </section>
-
               <section class="config-section">
-                <div class="config-section-heading"><h3>手机链路</h3><span>接收画面和选择坐标方向</span></div>
-                <div class="config-fields">
-                  <label>UDP 端口<input id="udpPort" type="number" min="1" max="65535"></label>
-                  <label>画面旋转
-                    <select id="rotate"><option value="auto">自动（PC 为 0°）</option><option>0</option><option>90</option><option>180</option><option>270</option></select>
-                  </label>
-                  <label>共享内存名称<input id="sharedMemory" type="text"></label>
-                  <label class="check-row"><input id="mirror" type="checkbox"><span>镜像输入画面</span></label>
-                </div>
+                <label class="switch-row"><span><strong data-zh="眼跳预测" data-en="Saccade prediction">眼跳预测</strong><small data-zh="根据眼部运动与画面延迟，短时预测眼跳。" data-en="Short-horizon prediction based on eye motion and frame delay.">根据眼部运动与画面延迟，短时预测眼跳。</small></span><input id="eventTemporalEnabled" type="checkbox" role="switch"></label>
+                <p class="field-help" data-zh="注视稳定已内置：根据采集到的静止与运动证据自动介入。关闭预测不会关闭稳定处理。" data-en="Fixation stability is built in and follows measured stillness and motion. Turning prediction off does not disable stability.">注视稳定已内置：根据采集到的静止与运动证据自动介入。关闭预测不会关闭稳定处理。</p>
+                <p id="stabilityStatus" class="inline-status"></p>
               </section>
-
-              <section class="config-section">
-                <div class="config-section-heading"><h3>PC 摄像头</h3><span>与手机二选一。采集在线程中持续运行，不受网页是否在前台的影响。</span></div>
+              <details id="geometrySettings" class="config-section">
+                <summary data-zh="屏幕与相机位置" data-en="Screen & camera position">屏幕与相机位置</summary>
+                <p id="geometryStatus" class="field-help"></p>
                 <div class="config-fields">
-                  <label>输入源
-                    <select id="inputSource"><option value="phone_udp">手机 UDP</option><option value="windows_camera">Windows PC 摄像头</option></select>
-                  </label>
-                  <label>设备
-                    <select id="windowsCameraIndex"><option value="0">Windows camera 0</option></select>
-                  </label>
-                  <label>视频宽度<input id="windowsCameraWidth" type="number" min="320" max="4096" step="1"></label>
-                  <label>视频高度<input id="windowsCameraHeight" type="number" min="240" max="4096" step="1"></label>
-                  <label>目标 FPS<input id="windowsCameraFps" type="number" min="1" max="120" step="1"></label>
-                  <label>Windows 后端
-                    <select id="windowsCameraBackend"><option value="auto">Auto</option><option value="dshow">DirectShow</option><option value="msmf">Media Foundation</option></select>
-                  </label>
-                  <label>水平视场角（度）<input id="windowsCameraFov" type="number" min="20" max="140" step="0.1"><small>PC 摄像头暂无 Camera2 内参，使用此值估算；更换设备或分辨率后应重新校准。</small></label>
-                  <button id="refreshWindowsCamerasButton" class="button secondary" type="button">刷新设备</button>
-                  <button id="applyWindowsCameraButton" class="button primary" type="button">应用摄像头设置</button>
-                </div>
-              </section>
-
-              <section class="config-section">
-                <div class="config-section-heading"><h3>屏幕与相机几何</h3><span>校准和运行必须使用同一组数值</span></div>
-                <div class="config-fields geometry-fields">
-                  <label>屏幕宽度（像素）<input id="screenWidth" type="number" min="320"></label>
-                  <label>屏幕高度（像素）<input id="screenHeight" type="number" min="240"></label>
-                  <label>屏幕尺寸（英寸）<input id="screenDiagonal" type="number" min="10" step="0.1"></label>
-                  <fieldset class="geometry-fieldset">
-                    <legend>相机相对屏幕中心位置（厘米）</legend>
-                    <label>水平，向右为正<input id="cameraOffsetX" type="number" min="-200" max="200" step="0.01"></label>
-                    <label>垂直，向下为正<input id="cameraOffsetY" type="number" min="-200" max="200" step="0.01"></label>
-                    <label>深度，向用户为正<input id="cameraOffsetZ" type="number" min="-200" max="200" step="0.01"></label>
-                    <p id="geometryStatus" class="geometry-status"></p>
+                  <label><span data-zh="屏幕宽度（像素）" data-en="Screen width (px)">屏幕宽度（像素）</span><input id="screenWidth" type="number" min="320" max="16384"></label>
+                  <label><span data-zh="屏幕高度（像素）" data-en="Screen height (px)">屏幕高度（像素）</span><input id="screenHeight" type="number" min="240" max="16384"></label>
+                  <label class="wide"><span data-zh="屏幕对角线（英寸）" data-en="Screen diagonal (inches)">屏幕对角线（英寸）</span><input id="screenDiagonal" type="number" min="10" max="100" step="0.1"></label>
+                  <fieldset class="wide geometry-fields"><legend data-zh="相机相对屏幕中心的位置（厘米）" data-en="Camera position from screen center (cm)">相机相对屏幕中心的位置（厘米）</legend>
+                    <label><span data-zh="水平 · 右为正" data-en="Horizontal · right +">水平 · 右为正</span><input id="cameraOffsetX" type="number" min="-200" max="200" step="0.01"></label>
+                    <label><span data-zh="垂直 · 下为正" data-en="Vertical · down +">垂直 · 下为正</span><input id="cameraOffsetY" type="number" min="-200" max="200" step="0.01"></label>
+                    <label><span data-zh="深度 · 向用户为正" data-en="Depth · toward you +">深度 · 向用户为正</span><input id="cameraOffsetZ" type="number" min="-200" max="200" step="0.01"></label>
                   </fieldset>
                 </div>
-              </section>
-
-              <section class="config-section output-section">
-                <div class="config-section-heading"><h3>自适应输出管线</h3><span>两个阶段可以叠加，推荐同时启用</span></div>
-                <p class="pipeline-summary"><strong>处理顺序：</strong>双眼融合 → 稳定基线 → 运动状态判断与延迟补偿 → 屏幕边界约束。两个开关分别用于对比和诊断，不是互斥模式。</p>
-                <div class="processing-block">
-                  <div class="processing-heading"><h4>阶段 A · 稳定基线（1 Euro）</h4><label class="check-row"><input id="oneEuroEnabled" type="checkbox"><span>启用</span></label></div>
-                  <p class="field-help">静止时抑制小抖动，运动时自适应提高响应。单独开启时只负责稳定，不预测运动，也不补偿固定链路延迟。</p>
-                  <div class="config-fields">
-                    <label>最小截止频率<input id="oneEuroMinCutoff" type="number" min="0.01" max="30" step="0.05"><small>越大越灵敏，也越容易抖动。</small></label>
-                    <label>速度响应 beta<input id="oneEuroBeta" type="number" min="0" max="10" step="0.01"><small>运动越快时提高响应，过大可能放大噪声。</small></label>
-                    <label>导数截止频率<input id="oneEuroDerivativeCutoff" type="number" min="0.01" max="30" step="0.05"><small>速度估计的平滑程度，越低越稳。</small></label>
-                  </div>
+              </details>
+              <details class="config-section">
+                <summary data-zh="连接与方向设置" data-en="Connection & orientation">连接与方向设置</summary>
+                <div class="config-fields">
+                  <label><span data-zh="手机端口（UDP / TCP）" data-en="Phone port (UDP / TCP)">手机端口（UDP / TCP）</span><input id="udpPort" type="number" min="1" max="65535"></label>
+                  <label><span data-zh="画面旋转" data-en="Frame rotation">画面旋转</span><select id="rotate"><option value="auto" data-zh="自动" data-en="Auto">自动</option><option value="0">0°</option><option value="90">90°</option><option value="180">180°</option><option value="270">270°</option></select></label>
+                  <label class="check-row"><input id="mirror" type="checkbox"><span data-zh="镜像画面" data-en="Mirror frame">镜像画面</span></label>
+                  <label><span data-zh="电脑摄像头后端" data-en="PC camera backend">电脑摄像头后端</span><select id="windowsCameraBackend"><option value="auto" data-zh="自动" data-en="Auto">自动</option><option value="dshow">DirectShow</option><option value="msmf">Media Foundation</option></select></label>
+                  <label class="wide"><span data-zh="共享内存名称" data-en="Shared memory name">共享内存名称</span><input id="sharedMemory" type="text"></label>
                 </div>
-                <div class="processing-block">
-                  <div class="processing-heading"><h4>阶段 B · 状态感知延迟补偿（30 FPS）</h4><label class="check-row"><input id="extrapolationEnabled" type="checkbox"><span>启用</span></label></div>
-                  <p class="field-help">使用原始点判断固定注视、连续运动、眼跳上升和落地。固定注视采用阶段 A 的稳定点；连续运动按手机时间戳外推；眼跳上升段使用实测得到的短预测并旁路滤波，落地立即跟随最新点并重置滤波。</p>
-                  <div class="config-fields">
-                    <label>预测时域（毫秒）<input id="extrapolationHorizon" type="number" min="0" max="300" step="1"><small>应接近稳定的端到端延迟，不是越大越好。默认 85 ms。</small></label>
-                    <label>最大外推距离（屏幕对角线 %）<input id="extrapolationMaxLeadPercent" type="number" min="0" max="50" step="0.5"><small>异常速度保护上限，过小会欠补偿，过大可能越界。</small></label>
-                  </div>
-                </div>
-                <div class="processing-block diagnostics-block">
-                  <div class="processing-heading"><h4>运动诊断记录</h4><label class="check-row"><input id="motionDiagnosticsEnabled" type="checkbox"><span>记录逐帧数据</span></label></div>
-                  <p class="field-help">开启后点击“保存并应用”开始新会话；关闭并保存结束会话。记录手机源时间、PC 链路时间、双眼与融合坐标、滤波/最终坐标、头姿和补偿状态，不保存视频画面。</p>
-                  <p id="motionDiagnosticsStatus" class="diagnostics-status">未开始记录</p>
-                </div>
-              </section>
+              </details>
             </form>
-            <div class="config-apply-row"><p id="configApplyStatus" class="config-apply-status">配置尚未加载</p><button id="saveConfigButton" class="button secondary" disabled>保存并应用</button></div>
+            <div class="config-apply-row"><p id="configApplyStatus" role="status"></p><button id="saveConfigButton" class="button primary" disabled data-zh="保存设置" data-en="Save settings">保存设置</button></div>
           </section>
         </div>
-
-        <section id="pairingPanel" class="panel status-panel">
-          <div class="panel-heading"><h2>手机配对</h2><span id="pairingSummary">等待发现</span></div>
-          <p id="pairingDetail">在手机端点击“发现电脑”，首次连接需要在这里确认。</p>
-          <div id="pairingCandidates" class="profile-items"></div>
-          <div class="panel-actions"><button id="forgetPairingButton" class="button secondary" disabled>解除配对</button></div>
-        </section>
-
-        <section class="panel status-panel">
-          <div class="panel-heading"><h2>相机内参</h2><span id="intrinsicsSource">-</span></div>
-          <dl id="intrinsicsGrid" class="metric-grid"></dl>
-        </section>
-
-        <section class="panel status-panel">
-          <div class="panel-heading"><h2>校准与模型</h2><span>O/N + CNN</span></div>
-          <div id="artifactGrid" class="artifact-grid"></div>
-        </section>
+        <div class="secondary-actions"><button id="backgroundButton" class="button secondary" disabled data-zh="转入后台运行" data-en="Run in background">转入后台运行</button><button id="exitButton" class="button quiet" data-zh="退出程序" data-en="Exit application">退出程序</button></div>
       </section>
-
       <section id="calibrationPage" class="page">
-        <div class="page-heading">
-          <div><h1>全屏校准</h1><p id="calibrationStatus">25点静态眼动 + 光照锚点 + 4头姿 × 5注视点</p></div>
-          <button id="startCalibrationButton" class="button primary" disabled>开始完整校准</button>
+        <div class="page-heading"><div><h1 data-zh="两阶段校准" data-en="Two-stage calibration">两阶段校准</h1><p data-zh="先校准位置，再采集眼跳与注视。每个阶段可单独开始。" data-en="Calibrate position, then capture saccades and fixations. Start each stage separately.">先校准位置，再采集眼跳与注视。每个阶段可单独开始。</p></div></div>
+        <div id="calibrationReadiness" class="setup-banner" role="status"></div>
+        <div class="calibration-grid">
+          <section class="panel stage-card">
+            <div class="stage-number">1</div><h2 data-zh="位置校准" data-en="Position calibration">位置校准</h2>
+            <p data-zh="12 条直线，覆盖四角、边缘和中央。眼睛跟随蓝点，准备好后沿线拖动，无需组间确认。" data-en="12 lines covering corners, edges and center. Follow the blue dot and drag along each line when ready; no group confirmations.">12 条直线，覆盖四角、边缘和中央。眼睛跟随蓝点，准备好后沿线拖动，无需组间确认。</p>
+            <p class="muted" data-zh="使用当前预训练基座做个人位置适配。训练集用于训练，测试集用于选择轮数；训练完成后启用新模型。" data-en="Personalizes the pretrained base. Train on the training set and select the epoch on the test set; activate the new model after training.">使用当前预训练基座做个人位置适配。训练集用于训练，测试集用于选择轮数；训练完成后启用新模型。</p>
+            <button id="startVideoButton" class="button primary" disabled data-zh="开始第一阶段" data-en="Start stage 1">开始第一阶段</button>
+          </section>
+          <section class="panel stage-card">
+            <div class="stage-number">2</div><h2 data-zh="眼跳与注视" data-en="Saccades & fixations">眼跳与注视</h2>
+            <p data-zh="12 段，约 1 分钟：短、中、长距离与四向跳转，等待时间随机。点跳后再看过去并持续注视；无需点击，可随时暂停。" data-en="12 sequences, about 1 minute: short, medium and long jumps across four axes with varied waits. Follow after the dot jumps and hold your gaze. No clicking; pause anytime.">12 段，约 1 分钟：短、中、长距离与四向跳转，等待时间随机。点跳后再看过去并持续注视；无需点击，可随时暂停。</p>
+            <p class="muted" data-zh="检查稳定性与落点，并更新自动稳定的判断依据。不重新训练位置模型；可稍后补做。" data-en="Checks stability and landing behavior, and updates automatic stability evidence. Leaves the position model unchanged; you can do this later.">检查稳定性与落点，并更新自动稳定的判断依据。不重新训练位置模型；可稍后补做。</p>
+            <button id="startEventButton" class="button primary" disabled data-zh="开始第二阶段" data-en="Start stage 2">开始第二阶段</button>
+          </section>
         </div>
-        <section class="panel lighting-presets">
-          <div class="panel-heading"><h2>光照预设</h2><span id="activeLightingProfile">当前：参考光照</span></div>
-          <div class="profile-controls">
-            <label>选择已保存预设
-              <select id="calibrationLightingProfile">
-                <option value="reference">参考光照</option>
-              </select>
-            </label>
-            <button id="applyLightingProfileButton" class="button secondary" disabled>应用预设</button>
-          </div>
-          <div id="lightingProfileItems" class="profile-items"></div>
-          <p id="lightingProfileList" class="profile-list">已保存：参考光照</p>
+        <section class="panel calibration-status">
+          <div class="panel-heading"><h2 data-zh="校准状态" data-en="Calibration status">校准状态</h2><span id="modelStatus"></span></div>
+          <p id="videoStatus" class="panel-note" role="status"></p>
+          <progress id="trainingProgress" hidden></progress>
+          <p id="activeModelInfo" class="panel-note"></p>
         </section>
-        <section class="panel calibration-data">
-          <div class="panel-heading"><h2>原始数据</h2><span>25点 + 10个光照锚点 + 4头姿 × 5注视点</span></div>
-          <div id="datasetGrid" class="artifact-grid"></div>
-          <div class="panel-actions">
-            <label>新光照名称<input id="lightingAdaptationName" type="text" placeholder="例如：夜间台灯"></label>
-            <label>校准背景亮度<input id="lightingAdaptationLevel" type="number" min="0.05" max="1" step="0.01" value="0.42"></label>
-            <button id="startLightingAdaptationButton" class="button secondary" disabled>添加当前光照</button>
-          </div>
-        </section>
+        <p class="footnote" data-zh="采集中可用空格暂停；Esc 退出全屏会暂停采集。结束任务会保留已采集数据。" data-en="Press Space to pause. Esc pauses capture when leaving fullscreen. Ending a run keeps captured data.">采集中可用空格暂停；Esc 退出全屏会暂停采集。结束任务会保留已采集数据。</p>
       </section>
-
       <section id="previewPage" class="page preview-page">
         <div class="preview-toolbar">
-          <div class="preview-title"><strong id="previewMode">O + CNN</strong><span id="previewState">等待输出</span></div>
-          <div class="preview-processing"><span id="previewPostprocess">滤波 - · 外推 -</span><span id="previewMotionMode">模式 -</span></div>
-          <button id="previewStartButton" class="button primary" disabled>启动预览</button>
+          <div><strong data-zh="注视预览" data-en="Gaze preview">注视预览</strong><span id="previewState"></span></div>
+          <div class="preview-processing"><span id="previewPostprocess"></span><span id="previewMotionMode"></span></div>
+          <button id="previewStartButton" class="button primary" disabled data-zh="全屏预览" data-en="Fullscreen preview">全屏预览</button>
         </div>
-        <div id="gazeStage" class="gaze-stage">
-          <div id="rightDot" class="gaze-dot right" hidden></div>
-          <div id="leftDot" class="gaze-dot left" hidden></div>
+        <div id="gazeStage" class="gaze-stage"><div class="gaze-legend" data-zh="黄：融合输出" data-en="Yellow: combined gaze">黄：融合输出</div>
           <div id="combinedDot" class="gaze-dot combined" hidden></div>
         </div>
       </section>
+      <section id="performancePage" class="page performance-page">
+        <div class="page-heading"><div><h1 data-zh="运行性能" data-en="Performance">运行性能</h1><p data-zh="追踪时持续统计最近 30 秒；关闭网页不影响后台运行。" data-en="Tracks the last 30 seconds while running, including when this page is closed.">追踪时持续统计最近 30 秒；关闭网页不影响后台运行。</p></div><span id="latencyLiveState" class="badge"></span></div>
+        <div class="latency-summary-grid">
+          <article class="latency-card"><span data-zh="源帧 → 共享内存" data-en="Source frame → shared memory">源帧 → 共享内存</span><strong id="latencyEndToEnd">—</strong><small id="latencyEndToEndStats"></small></article>
+          <article class="latency-card"><span data-zh="分阶段合计" data-en="Sum of stages">分阶段合计</span><strong id="latencyStageSum">—</strong><small id="latencySumCheck"></small></article>
+          <article class="latency-card"><span data-zh="估算到显示" data-en="Estimated time to display">估算到显示</span><strong id="latencyToDisplay">—</strong><small id="latencyDisplayNote"></small></article>
+          <article class="latency-card"><span data-zh="电脑处理" data-en="PC processing">电脑处理</span><strong id="latencyProcessing">—</strong><small id="latencyProcessingStats"></small></article>
+        </div>
+        <section class="panel"><div class="panel-heading"><h2 data-zh="最近输出" data-en="Recent output">最近输出</h2><span data-zh="绿：全流程 · 黄：分段合计" data-en="Green: total · Yellow: stage sum">绿：全流程 · 黄：分段合计</span></div><div class="latency-chart-wrap"><canvas id="latencyChart" aria-label="Latency chart / 延迟图"></canvas></div></section>
+        <details class="panel performance-details">
+          <summary data-zh="阶段明细与时间基准" data-en="Stage details & timing reference">阶段明细与时间基准</summary>
+          <p id="latencySamples" class="panel-note"></p>
+          <div class="table-wrap"><table><thead><tr><th data-zh="阶段" data-en="Stage">阶段</th><th data-zh="当前" data-en="Now">当前</th><th data-zh="均值" data-en="Mean">均值</th><th>P95</th><th data-zh="最大" data-en="Max">最大</th></tr></thead><tbody id="latencyStageRows"></tbody></table></div>
+          <p id="latencyBasis" class="panel-note"></p><p id="latencyMeasurementNote" class="panel-note"></p>
+          <dl class="metric-grid"><div><dt data-zh="当前预测时域" data-en="Prediction horizon">当前预测时域</dt><dd id="latencyHorizon">—</dd></div><div><dt data-zh="显示预算" data-en="Display budget">显示预算</dt><dd id="latencyDisplayBudget">—</dd></div><div><dt data-zh="统计窗口" data-en="Window">统计窗口</dt><dd id="latencyWindow">30 s</dd></div></dl>
+        </details>
+        <p class="footnote" data-zh="跨设备链路与显示时间包含估算，不等于实测出光延迟。" data-en="Cross-device and display timing include estimates; this is not measured photon latency.">跨设备链路与显示时间包含估算，不等于实测出光延迟。</p>
+      </section>
     </main>
   </div>
-
-  <div id="calibrationOverlay" class="calibration-overlay" hidden>
-    <button id="cancelCalibrationButton" class="overlay-exit" aria-label="退出校准">X</button>
-    <div id="calibrationMessage" class="calibration-message"></div>
-    <button id="calibrationTarget" class="calibration-target" aria-label="采集当前目标"></button>
+  <div id="videoOverlay" class="calibration-overlay" hidden>
+    <button id="cancelVideoButton" class="overlay-exit" aria-label="End capture / 结束采集">×</button>
+    <div id="videoMessage" class="calibration-message" role="status"></div>
+    <svg id="videoRail" aria-hidden="true" preserveAspectRatio="none" viewBox="0 0 100 100" hidden><line id="videoRailLine"/><circle id="videoRailEnd" r="0.8"/></svg>
+    <button id="videoTarget" class="calibration-target" aria-label="Look at the blue dot / 请注视蓝点" tabindex="-1"></button>
+    <div id="videoProgress" class="video-progress"></div>
+    <button id="pauseVideoButton" class="button video-pause" hidden data-zh="暂停（空格）" data-en="Pause (Space)">暂停（空格）</button>
+    <div id="videoControls" class="video-controls" hidden><button id="resumeVideoButton" class="button primary"></button><p data-zh="暂停时可休息；右上角 × 结束采集并保留数据。" data-en="Rest while paused. Use × to end capture and keep data.">暂停时可休息；右上角 × 结束采集并保留数据。</p></div>
   </div>
-
-  <div id="lightingSelectionModal" class="modal-backdrop" hidden>
-    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="lightingSelectionTitle">
-      <h2 id="lightingSelectionTitle">保留光照预设</h2>
-      <p id="lightingSelectionDescription">新基座已经训练完成。选择要用旧样本在新模型上重新训练的自定义光照适配层。</p>
-      <div id="lightingSelectionItems" class="selection-items"></div>
-      <div class="modal-actions">
-        <button id="abandonCalibrationButton" class="button danger" type="button">放弃本次校准</button>
-        <button id="completeLightingSelectionButton" class="button primary" type="button">保留所选并完成</button>
-      </div>
-    </section>
-  </div>
-
-  <div id="toast" class="toast" hidden></div>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <script src="/i18n.js"></script>
   <script src="/app.js"></script>
+  <script src="/unified-plan.js"></script>
+  <script src="/video.js"></script>
 </body>
 </html>
