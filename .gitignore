@@ -38,3 +38,62 @@ Thumbs.db
 # Keep internal design notes local; publish only the root project README.
 *.md
 !/README.md
+
+# Private research notes, captures, local deployment helpers and release bundles.
+.codex/
+.codex-progress.txt
+pc-provider/docs/
+pc-provider/install-to-tools.ps1
+pc-provider/test-h264-transport.bat
+phone-app/releases/
+*.7z
+*.zip
+*.pt
+*.pth
+*.onnx
+*.npy
+*.npz
+*.mp4
+*.avi
+*.h264
+.env
+.env.*
+*.jks
+*.keystore
+
+# Publish maintained utilities explicitly; retain one-off experiments locally.
+pc-provider/tools/*
+!pc-provider/tools/analyze_motion_diagnostics.py
+!pc-provider/tools/recompute_shared_eye_dataset.py
+!pc-provider/tools/recover_full_calibration.py
+!pc-provider/tools/train_shared_eye_models.py
+!pc-provider/tools/replay_video_archive.py
+!pc-provider/tools/compact_video_sessions.py
+!pc-provider/tools/evaluate_partial_events.py
+!pc-provider/tools/audit_prediction_observability.py
+!pc-provider/tools/check_control_contract.cjs
+!pc-provider/tools/check_spatial_plan.cjs
+!pc-provider/tools/check_event_plan.cjs
+!pc-provider/tools/check_unified_plan.cjs
+!pc-provider/tools/check_prediction_plan.cjs
+!pc-provider/tools/check_preview_coordinates.cjs
+!pc-provider/tools/check_unified_calibration_ui.cjs
+
+# Tests of unpublished experimental trainers require the local research tools.
+pc-provider/tests/test_binocular_confidence.py
+pc-provider/tests/test_conditioned_branches.py
+pc-provider/tests/test_conditioned_capture.py
+pc-provider/tests/test_conditioned_training.py
+pc-provider/tests/test_eye_reprojection.py
+pc-provider/tests/test_personal_eye_geometry.py
+
+# The base checkpoint and matching normalization metadata are release assets.
+pc-provider/models/public-conditioned/
+
+# Retired phone benchmark harness; not used by either shipping capture route.
+phone-app/app/src/main/java/com/eyetracing/android/CameraProbeReport.kt
+phone-app/app/src/main/java/com/eyetracing/android/CaptureProbeSamples.kt
+phone-app/app/src/main/java/com/eyetracing/android/ProbeEncoder.kt
+phone-app/app/src/main/java/com/eyetracing/android/ProbeReadback.kt
+phone-app/app/src/main/java/com/eyetracing/android/ProbeTexture.kt
+phone-app/app/src/test/java/com/eyetracing/android/CaptureProbeSamplesTest.kt

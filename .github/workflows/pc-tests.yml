@@ -26,4 +26,15 @@ jobs:
         run: python -m unittest discover -s tests -q
       - name: Validate web script
         working-directory: pc-provider
-        run: node --check web/app.js
+        run: |
+          Get-ChildItem web/*.js | ForEach-Object {
+            node --check $_.FullName
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: Check control and capture contracts
+        working-directory: pc-provider
+        run: |
+          foreach ($script in @('check_control_contract', 'check_spatial_plan', 'check_event_plan', 'check_unified_plan', 'check_prediction_plan')) {
+            node "tools/$script.cjs"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }

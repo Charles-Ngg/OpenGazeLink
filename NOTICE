@@ -8,5 +8,10 @@ This product includes software and models developed by third parties:
 - NumPy, BSD 3-Clause License
 - PyTorch, BSD 3-Clause License
 - AndroidX and Kotlin, Apache License 2.0
+- PyAV, BSD 3-Clause License; its FFmpeg libraries retain their own licenses
+
+Separately supplied pretrained eye-model weights and their training datasets
+are not relicensed under the source-code license. Release distributors must
+include the applicable asset provenance and redistribution terms.
 
 Third-party names and trademarks are the property of their respective owners.

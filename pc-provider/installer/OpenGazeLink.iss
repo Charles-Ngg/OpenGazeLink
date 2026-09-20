@@ -48,11 +48,14 @@ Name: "{autodesktop}\OpenGazeLink 控制中心"; Filename: "{app}\{#MyAppExeName
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""EyeTracing UDP"""; Flags: runhidden waituntilterminated
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""OpenGazeLink UDP"""; Flags: runhidden waituntilterminated
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""OpenGazeLink UDP"" dir=in action=allow protocol=UDP localport=5006,5007 profile=private program=""{app}\{#MyAppExeName}"""; Flags: runhidden waituntilterminated
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""OpenGazeLink TCP"""; Flags: runhidden waituntilterminated
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""OpenGazeLink TCP"" dir=in action=allow protocol=TCP localport=5007 profile=private program=""{app}\{#MyAppExeName}"""; Flags: runhidden waituntilterminated
 Filename: "{app}\{#MyAppExeName}"; Parameters: "control"; Description: "启动 OpenGazeLink 控制中心"; Flags: nowait postinstall skipifsilent
 
 [UninstallRun]
 Filename: "{app}\{#MyAppExeName}"; Parameters: "stop"; Flags: runhidden waituntilterminated; RunOnceId: "StopOpenGazeLink"
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""OpenGazeLink UDP"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveOpenGazeLinkFirewall"
+Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""OpenGazeLink TCP"""; Flags: runhidden waituntilterminated; RunOnceId: "RemoveOpenGazeLinkTcpFirewall"
 
 [Code]
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
