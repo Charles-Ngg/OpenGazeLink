@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import time
+from . import runtime_clock
 
 import numpy as np
 
@@ -41,7 +42,7 @@ class OneEuroFilter2D:
         value = np.asarray(point, dtype=np.float64)
         if value.shape != (2,) or not np.isfinite(value).all():
             raise ValueError("One Euro filter requires a finite 2D point")
-        now = time.monotonic() if timestamp is None else float(timestamp)
+        now = runtime_clock.monotonic() if timestamp is None else float(timestamp)
         if self._raw_value is None or self._filtered_value is None or self._timestamp is None:
             self._raw_value = value.copy()
             self._filtered_value = value.copy()

@@ -7,6 +7,7 @@ from pathlib import Path
 import socket
 import threading
 import time
+from . import runtime_clock
 import uuid
 from typing import Callable
 
@@ -103,7 +104,7 @@ class PairingService:
         )
         with self._lock:
             self._pending[phone_id] = PendingPhone(
-                phone_id, phone_name, address[0], time.monotonic(),
+                phone_id, phone_name, address[0], runtime_clock.monotonic(),
             )
         if accepted:
             self._on_paired_source(address[0])
@@ -121,7 +122,7 @@ class PairingService:
         self._socket.sendto(encoded, address)
 
     def _expire(self) -> None:
-        threshold = time.monotonic() - 15.0
+        threshold = runtime_clock.monotonic() - 15.0
         with self._lock:
             self._pending = {
                 key: phone for key, phone in self._pending.items()
@@ -141,7 +142,7 @@ class PairingService:
                     "phone_id": phone.phone_id,
                     "name": phone.name,
                     "address": phone.address,
-                    "age_ms": max(0.0, (time.monotonic() - phone.last_seen) * 1000.0),
+                    "age_ms": max(0.0, (runtime_clock.monotonic() - phone.last_seen) * 1000.0),
                 }
                 for phone in self._pending.values()
                 if phone.phone_id != paired_id

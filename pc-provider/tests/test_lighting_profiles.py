@@ -14,8 +14,12 @@ from opengazelink_pc.config import ProviderConfig
 class LightingProfileTest(unittest.TestCase):
     def test_full_calibration_defers_old_samples_until_post_training_selection(self) -> None:
         class Backend:
-            def __init__(self, name: str) -> None:
+            created = {}
+
+            def __init__(self, name: str, conditioned: bool = False) -> None:
                 self.name = name
+                self.conditioned = conditioned
+                self.created[name] = conditioned
 
             def close(self) -> None:
                 return
@@ -39,6 +43,7 @@ class LightingProfileTest(unittest.TestCase):
              mock.patch.object(sessions, "_library_record_matches", return_value=True):
             calibration = sessions.CalibrationSession(None, ProviderConfig(), object())
             try:
+                self.assertEqual({"legacy": False, "tasks": True}, Backend.created)
                 self.assertEqual(["room"], [
                     item["name"] for item in calibration._candidate_status()
                 ])

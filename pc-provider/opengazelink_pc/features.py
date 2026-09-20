@@ -470,8 +470,10 @@ def _estimate_rigid_head_pose(
     camera_model = camera_model or {}
     fx = float(camera_model.get("fx", max(width, height)))
     fy = float(camera_model.get("fy", max(width, height)))
-    cx = float(camera_model.get("cx", width * 0.5))
-    cy = float(camera_model.get("cy", height * 0.5))
+    cx = float(camera_model.get("cx", (width - 1) * 0.5))
+    cy = float(camera_model.get("cy", (height - 1) * 0.5))
+    if not all(np.isfinite(value) for value in (fx, fy, cx, cy)) or fx <= 0.0 or fy <= 0.0:
+        return {"valid": False, "error": "invalid camera intrinsics"}
     camera_matrix = np.array(
         [[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]],
         dtype=np.float64,

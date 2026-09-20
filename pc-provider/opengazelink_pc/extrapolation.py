@@ -162,8 +162,8 @@ class FixedHorizonExtrapolator2D:
         if self._state == "continuous_motion":
             lead = self._velocity * self.horizon_ms
         elif self._state == "jump":
-            # At 30 FPS the first observed saccade step is often most of the move.
-            # The recorded 80 ms holdout favored a short 20 ms velocity lead.
+            # Experimental short jump lead. Earlier offline proxy scores did
+            # not establish useful compensation in the user's live testing.
             jump_gain_ms = min(20.0, 0.25 * self.horizon_ms)
             lead = self._instant_velocity * jump_gain_ms
 

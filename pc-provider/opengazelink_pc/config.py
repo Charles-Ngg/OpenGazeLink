@@ -19,6 +19,7 @@ class ProviderConfig:
     discovery_port: int = 5006
     paired_phone_id: str = ""
     paired_phone_name: str = ""
+    paired_phone_address: str = ""
     rotate: str = "auto"
     mirror: bool = False
     windows_camera_index: int = 0
@@ -27,7 +28,8 @@ class ProviderConfig:
     windows_camera_fps: int = 30
     windows_camera_backend: str = "auto"
     windows_camera_fov_x_degrees: float = 60.0
-    landmarker: str = "legacy"
+    landmarker: str = "tasks"
+    gaze_model: str = "conditioned_video"
     lighting_profile: str = "reference"
     screen_width: int = 3840
     screen_height: int = 2160
@@ -43,7 +45,12 @@ class ProviderConfig:
     one_euro_min_cutoff: float = 1.0
     one_euro_beta: float = 2.0
     one_euro_derivative_cutoff: float = 1.0
-    extrapolation_enabled: bool = True
+    extrapolation_enabled: bool = False
+    video_forecast_enabled: bool = False
+    # Public preference: prediction only. Fixation stability is always automatic.
+    event_temporal_enabled: bool = True
+    prediction_auto_horizon_enabled: bool = True
+    prediction_display_delay_ms: float = 16.0
     extrapolation_horizon_ms: float = 85.0
     extrapolation_max_lead_fraction: float = 0.12
     motion_diagnostics_enabled: bool = False
@@ -85,7 +92,16 @@ class ProviderConfig:
         )
         rotate = str(self.rotate).lower()
         self.rotate = rotate if rotate in ("auto", "0", "90", "180", "270") else "auto"
-        self.landmarker = self.landmarker if self.landmarker in ("tasks", "legacy") else "legacy"
+        # Migrate saved development settings as well as new API writes. Old model
+        # files remain untouched for offline experiments, but are no longer a
+        # selectable runtime path.
+        self.landmarker = "tasks"
+        self.gaze_model = "conditioned_video"
+        self.lighting_profile = "reference"
+        self.one_euro_enabled = True
+        self.video_forecast_enabled = False
+        self.extrapolation_enabled = False
+        self.prediction_auto_horizon_enabled = True
         self.screen_width = max(320, min(16384, self.screen_width))
         self.screen_height = max(240, min(16384, self.screen_height))
         self.screen_diagonal_inches = self._finite_clamped(
@@ -100,6 +116,7 @@ class ProviderConfig:
         self.extrapolation_horizon_ms = self._finite_clamped(
             self.extrapolation_horizon_ms, 0.0, 300.0,
         )
+        self.prediction_display_delay_ms = self._finite_clamped(self.prediction_display_delay_ms, 0.0, 100.0)
         self.extrapolation_max_lead_fraction = self._finite_clamped(
             self.extrapolation_max_lead_fraction, 0.0, 0.5,
         )

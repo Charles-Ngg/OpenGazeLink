@@ -1,0 +1,39 @@
+OpenGazeLink base eye model
+
+This notice applies to models/public-conditioned/best.pt and result.json in
+the Windows distribution and the separately distributed base-model archive.
+It does not change the Apache-2.0 license of OpenGazeLink source code.
+
+The base checkpoint was trained by the OpenGazeLink contributors on MPIIFaceGaze.
+It contains public-data pretraining only, not the maintainer's personal
+calibration or images. The personal trainer adapts a copy on the user's PC.
+
+Dataset: MPIIFaceGaze
+Authors: Xucong Zhang, Yusuke Sugano, Mario Fritz, Andreas Bulling
+Source: https://www.collaborative-ai.org/research/datasets/MPIIFaceGaze/
+Terms: Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
+https://creativecommons.org/licenses/by-nc-sa/4.0/
+https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode
+The dataset page states: "The data is only to be used for non-commercial
+scientific purposes."
+
+The bundled base weights and matching normalization metadata are distributed
+under CC BY-NC-SA 4.0 for non-commercial scientific use. Retain this attribution
+and the same license when sharing adaptations. No commercial-use permission is
+granted by OpenGazeLink's source-code license. No endorsement by the dataset
+authors is implied. No dataset photographs or original participant records
+are included in the release.
+
+Changes: perspective-normalized eye patches, corner/head geometry inputs,
+stride-4 eye network, train-only normalization; seed 9201. Participants p00-p12
+were used for training, p13 for epoch selection and p14 for public evaluation.
+This is not the official leave-one-participant-out benchmark.
+
+Checkpoint SHA-256:
+ee4c032fa042b872b20d1a9ce5b71f88c14cb45e687b6565809c77ce9c576f35
+
+References:
+Zhang et al., MPIIGaze: Real-World Dataset and Deep Appearance-Based Gaze
+Estimation, IEEE TPAMI 41(1), 162-175, 2019.
+Zhang et al., It's Written All Over Your Face: Full-Face Appearance-Based Gaze
+Estimation, CVPR Workshops, 2017.

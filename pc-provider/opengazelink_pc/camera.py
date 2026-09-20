@@ -7,17 +7,20 @@ import socket
 import struct
 import threading
 import time
+from . import runtime_clock
 
 import cv2
 import numpy as np
 
 from .paths import DATA_DIR
+from .transport_clock import CLOCK_MAGIC, TransportClock
 
 
 MAGIC = 0x56555945
 INTRINSICS_MAGIC = 0x49435945
 FORMAT_NV21 = 1
 FORMAT_JPEG = 2
+FORMAT_H264 = 3
 SUPPORTED_FRAME_FORMATS = {FORMAT_NV21, FORMAT_JPEG}
 HEADER = struct.Struct("<IHHIHHHHBBQQI")
 INTRINSICS_HEADER = struct.Struct("<IHHI")
@@ -34,6 +37,7 @@ class UdpYuvConfig:
     frame_stale_after_s: float = 0.75
     sequence_reset_after_s: float = 0.5
     intrinsics_cache_path: str = str(DEFAULT_INTRINSICS_CACHE_PATH)
+    allowed_source_ip: str | None = None
 
 
 @dataclass
@@ -47,6 +51,8 @@ class FrameAssembly:
     send_time_ns: int
     started_at: float
     chunks: dict[int, bytes]
+    completed_at: float = 0.0
+    clock_timing: dict | None = None
 
     @property
     def complete(self) -> bool:
@@ -76,6 +82,9 @@ def decode_udp_frame(frame_bytes: bytes, width: int, height: int, fmt: int) -> n
 
 
 class UdpYuvCamera:
+    @property
+    def supports_video_archive(self):
+        return True
     def __init__(self, config: UdpYuvConfig) -> None:
         self.config = config
         self._lock = threading.Lock()
@@ -102,13 +111,19 @@ class UdpYuvCamera:
         self._assemblies: dict[int, FrameAssembly] = {}
         self._pending_decode: FrameAssembly | None = None
         self._decode_drops = 0
+        self._h264_codec_config_archive = None
+        self._h264_reference_frames = 0
+        self._h264_skipped_images = 0
         self._decode_ms = 0.0
         self._phone_pipeline_ms = 0.0
         self._transport_delta_min_ns: int | None = None
         self._transport_queue_ms = 0.0
         self._intrinsics_cache_error = ""
-        self._allowed_source_ip: str | None = None
+        self._allowed_source_ip: str | None = config.allowed_source_ip
         self._last_source_ip = ""
+        self._transport_clock = TransportClock()
+        self._last_clock_probe_at = 0.0
+        self._clock_address = None
         self._load_cached_intrinsics()
         self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 256 * 1024)
@@ -121,18 +136,31 @@ class UdpYuvCamera:
         )
         self._thread.start()
         self._decode_thread.start()
+        from .h264_stream import H264TcpReceiver
+        try:
+            self._h264_receiver = H264TcpReceiver(self)
+        except Exception:
+            self.release()
+            raise
 
     def read_latest(self, after_seq: int = -1, timeout_s: float = 0.25):
-        deadline = time.monotonic() + timeout_s
+        ok, frame, timestamp, sequence = self.read_latest_shared(after_seq, timeout_s)
+        # Public callers retain an independent, writable image. Never copy a
+        # multi-megabyte frame while holding the producer/consumer lock.
+        return ok, frame.copy() if frame is not None else None, timestamp, sequence
+
+    def read_latest_shared(self, after_seq: int = -1, timeout_s: float = 0.25):
+        """Internal read-only snapshot; publication replaces, never reuses it."""
+        deadline = runtime_clock.monotonic() + timeout_s
         with self._frame_condition:
             while True:
-                now = time.monotonic()
+                now = runtime_clock.monotonic()
                 live = (
                     self._latest_frame is not None
                     and now - self._last_frame_at <= self.config.frame_stale_after_s
                 )
                 if live and self._latest_seq != after_seq:
-                    return True, self._latest_frame.copy(), self._latest_t_ms, self._latest_seq
+                    return True, self._latest_frame, self._latest_t_ms, self._latest_seq
                 remaining = deadline - now
                 if self._last_error or self._stop.is_set() or remaining <= 0.0:
                     return False, None, 0.0, after_seq
@@ -200,7 +228,7 @@ class UdpYuvCamera:
         return rotation if rotation in (0, 90, 180, 270) else 270
 
     def reported_mode(self) -> dict:
-        now = time.monotonic()
+        now = runtime_clock.monotonic()
         with self._lock:
             live = (
                 self._latest_frame is not None
@@ -221,14 +249,18 @@ class UdpYuvCamera:
                 "width": self._raw_width if live else 0,
                 "height": self._raw_height if live else 0,
                 "fps": fps, "sensorFps": sensor_fps,
-                "fourcc": "JPEG" if self._last_format == FORMAT_JPEG else "NV21",
-                "backend": f"udp://{self.config.bind}:{self.config.port}",
+                "fourcc": {FORMAT_JPEG: "JPEG", FORMAT_H264: "H264"}.get(self._last_format, "NV21"),
+                "inferenceMaxFps": self.inference_max_fps,
+                "backend": f"{'tcp' if self._last_format == FORMAT_H264 else 'udp'}://{self.config.bind}:{self.config.port}",
                 "chunks": self._received_chunks, "dropChunks": self._dropped_chunks,
                 "dropFrames": self._dropped_frames, "buffered": len(self._assemblies),
                 "decodeDrops": self._decode_drops,
+                "h264ReferenceFrames": self._h264_reference_frames,
+                "h264SkippedImages": self._h264_skipped_images,
                 "decodeMs": self._decode_ms,
                 "phonePipelineMs": self._phone_pipeline_ms,
                 "transportQueueMs": self._transport_queue_ms,
+                "clockProbe": self._transport_clock.latest(runtime_clock.monotonic_ns()),
                 "receiveBufferBytes": self._receive_buffer_bytes,
                 "sequenceResets": self._sequence_resets,
                 "frameAgeMs": max(0.0, (now - self._last_frame_at) * 1000.0) if self._last_frame_at else None,
@@ -253,12 +285,16 @@ class UdpYuvCamera:
         return frame
 
     def _receive_loop(self) -> None:
+        from .runtime_scheduling import set_realtime_thread_priority
+        set_realtime_thread_priority()
         while not self._stop.is_set():
-            now = time.monotonic()
-            self._drop_stale(now)
             try:
                 packet, address = self._socket.recvfrom(65535)
+                # Timestamp AFTER the blocking call, before parsing or locking.
+                now = runtime_clock.monotonic()
             except socket.timeout:
+                self._probe_clock(runtime_clock.monotonic())
+                self._drop_stale(runtime_clock.monotonic())
                 continue
             except OSError:
                 break
@@ -266,11 +302,31 @@ class UdpYuvCamera:
                 if self._allowed_source_ip and address[0] != self._allowed_source_ip:
                     continue
                 self._last_source_ip = address[0]
+                self._clock_address = address
                 self._handle_packet(packet, now)
+                self._drop_stale(now)
+                self._probe_clock(now)
             except Exception as error:
                 with self._frame_condition:
                     self._last_error = str(error)
                     self._frame_condition.notify_all()
+
+    @property
+    def inference_max_fps(self) -> float:
+        # MediaPipe now overlaps with gaze-model inference and operates on a
+        # face ROI. Ninety keeps headroom below the 120 Hz decoder without
+        # recreating the old 60 Hz artificial ceiling.
+        # No artificial inference ceiling. The latest-only handoff controls
+        # latency and naturally skips stale frames when the model is busy.
+        return 0.0
+
+    def _probe_clock(self, now):
+        if self._clock_address and now - self._last_clock_probe_at >= 1.0:
+            self._last_clock_probe_at = now
+            try:
+                self._socket.sendto(self._transport_clock.request(runtime_clock.monotonic_ns()), self._clock_address)
+            except OSError:
+                pass
 
     def set_allowed_source_ip(self, address: str | None) -> None:
         with self._lock:
@@ -280,11 +336,18 @@ class UdpYuvCamera:
         with self._lock:
             return {
                 "last_source_ip": self._last_source_ip,
-                "allowed_source_ip": self._allowed_source_ip or "",
+                "allowed_source_ip": "" if self._allowed_source_ip == "0.0.0.0" else self._allowed_source_ip or "",
+                "awaiting_paired_discovery": self._allowed_source_ip == "0.0.0.0",
             }
 
     def _handle_packet(self, packet: bytes, now: float) -> None:
+        archive = getattr(self, "video_archive", None)
+        if archive is not None:
+            archive.submit("udp_packet", {"pc_receive_ms": now * 1000}, packet)
         if len(packet) >= INTRINSICS_HEADER.size:
+            if struct.unpack_from("<I", packet)[0] == CLOCK_MAGIC:
+                self._transport_clock.receive(packet, int(now * 1_000_000_000))
+                return
             if struct.unpack_from("<I", packet)[0] == INTRINSICS_MAGIC:
                 self._handle_intrinsics(packet)
                 return
@@ -311,6 +374,7 @@ class UdpYuvCamera:
                 self._times.clear()
                 self._sensor_samples.clear()
                 self._transport_delta_min_ns = None
+                self._transport_clock = TransportClock()
                 self._transport_queue_ms = 0.0
                 self._sequence_resets += 1
             assembly = self._assemblies.get(frame_seq)
@@ -320,8 +384,9 @@ class UdpYuvCamera:
                     sensor_time_ns, send_time_ns, now, {},
                 )
                 self._assemblies[frame_seq] = assembly
+                assembly.clock_timing = self._transport_clock.latest(int(now * 1_000_000_000))
                 if send_time_ns:
-                    delta_ns = time.monotonic_ns() - send_time_ns
+                    delta_ns = int(now * 1_000_000_000) - send_time_ns
                     if self._transport_delta_min_ns is None or delta_ns < self._transport_delta_min_ns:
                         self._transport_delta_min_ns = delta_ns
                     self._transport_queue_ms = max(
@@ -343,6 +408,7 @@ class UdpYuvCamera:
             return
         with self._frame_condition:
             self._assemblies.pop(frame_seq, None)
+            assembly.completed_at = now
             if self._last_frame_seq is not None and frame_seq > self._last_frame_seq + 1:
                 self._dropped_frames += frame_seq - self._last_frame_seq - 1
             self._last_frame_seq = frame_seq
@@ -355,6 +421,8 @@ class UdpYuvCamera:
             self._frame_condition.notify_all()
 
     def _decode_loop(self) -> None:
+        from .runtime_scheduling import set_realtime_thread_priority
+        set_realtime_thread_priority()
         while not self._stop.is_set():
             with self._frame_condition:
                 while self._pending_decode is None and not self._stop.is_set():
@@ -364,6 +432,7 @@ class UdpYuvCamera:
                 assembly = self._pending_decode
                 self._pending_decode = None
             assert assembly is not None
+            decode_started_at = runtime_clock.monotonic()
             started = time.perf_counter()
             try:
                 frame = self._preprocess(decode_udp_frame(
@@ -375,45 +444,53 @@ class UdpYuvCamera:
                     self._frame_condition.notify_all()
                 continue
             decode_ms = (time.perf_counter() - started) * 1000.0
-            monotonic_now = time.monotonic()
+            monotonic_now = runtime_clock.monotonic()
             with self._frame_condition:
                 if self._pending_decode is not None and self._pending_decode.seq > assembly.seq:
                     self._decode_drops += 1
                     continue
-                self._raw_width, self._raw_height = assembly.width, assembly.height
-                self._last_format = assembly.fmt
-                self._latest_frame = frame
-                self._latest_t_ms = (
-                    assembly.sensor_time_ns / 1_000_000.0
-                    if assembly.sensor_time_ns else monotonic_now * 1000.0
-                )
-                self._latest_seq += 1
-                self._last_frame_at = monotonic_now
-                self._latest_frame_timings[self._latest_seq] = {
-                    "read_sequence": self._latest_seq,
-                    "phone_frame_sequence": assembly.seq,
-                    "phone_sensor_time_ns": assembly.sensor_time_ns,
-                    "phone_send_time_ns": assembly.send_time_ns,
-                    "pc_first_packet_monotonic_ns": int(assembly.started_at * 1_000_000_000.0),
-                    "pc_decode_done_monotonic_ns": int(monotonic_now * 1_000_000_000.0),
-                    "decode_ms": decode_ms,
-                }
-                for old_sequence in [
-                    value for value in self._latest_frame_timings
-                    if value < self._latest_seq - 8
-                ]:
-                    self._latest_frame_timings.pop(old_sequence, None)
-                self._last_error = ""
-                self._decode_ms = decode_ms
-                self._times.append(monotonic_now)
-                self._times = [value for value in self._times if value >= monotonic_now - 2.0]
-                if assembly.sensor_time_ns:
-                    self._sensor_samples.append((assembly.seq, assembly.sensor_time_ns))
-                    cutoff = assembly.sensor_time_ns - 2_000_000_000
-                    self._sensor_samples = [
-                        value for value in self._sensor_samples if value[1] >= cutoff
-                    ]
-                self._frame_condition.notify_all()
+                self._publish_decoded(assembly, frame, decode_started_at, decode_ms, monotonic_now)
+
+    def _publish_decoded(self, assembly, frame, decode_started_at, decode_ms, monotonic_now):
+        # Caller holds _frame_condition. Shared publication for UDP images and TCP AVC.
+        frame.setflags(write=False)
+        self._raw_width, self._raw_height = assembly.width, assembly.height
+        self._last_format = assembly.fmt
+        self._latest_frame = frame
+        self._latest_t_ms = (
+            assembly.sensor_time_ns / 1_000_000.0
+            if assembly.sensor_time_ns else monotonic_now * 1000.0
+        )
+        self._latest_seq += 1
+        self._last_frame_at = monotonic_now
+        self._latest_frame_timings[self._latest_seq] = {
+            **(assembly.clock_timing or {}),
+            "read_sequence": self._latest_seq,
+            "phone_frame_sequence": assembly.seq,
+            "phone_sensor_time_ns": assembly.sensor_time_ns,
+            "phone_send_time_ns": assembly.send_time_ns,
+            "pc_first_packet_monotonic_ns": int(assembly.started_at * 1_000_000_000.0),
+            "pc_last_packet_monotonic_ns": int(assembly.completed_at * 1_000_000_000.0),
+            "pc_decode_start_monotonic_ns": int(decode_started_at * 1_000_000_000.0),
+            "pc_decode_done_monotonic_ns": int(monotonic_now * 1_000_000_000.0),
+            "decode_ms": decode_ms,
+        }
+        for old_sequence in [
+            value for value in self._latest_frame_timings
+            if value < self._latest_seq - 8
+        ]:
+            self._latest_frame_timings.pop(old_sequence, None)
+        self._last_error = ""
+        self._decode_ms = decode_ms
+        self._times.append(monotonic_now)
+        self._times = [value for value in self._times if value >= monotonic_now - 2.0]
+        if assembly.sensor_time_ns:
+            self._sensor_samples.append((assembly.seq, assembly.sensor_time_ns))
+            cutoff = assembly.sensor_time_ns - 2_000_000_000
+            self._sensor_samples = [
+                value for value in self._sensor_samples if value[1] >= cutoff
+            ]
+        self._frame_condition.notify_all()
 
     def _drop_stale(self, now: float) -> None:
         with self._lock:
@@ -447,21 +524,49 @@ class UdpYuvCamera:
         packet_rotation = int(message.get("frameRotation", 270))
         if packet_rotation not in (0, 90, 180, 270):
             packet_rotation = 270
-        maximum = max(model["width"], model["height"])
+        # Cropping translates K; it does not shrink focal lengths or move the
+        # optical axis to the new image center. Validate in original coordinates.
+        check_width, check_height = model["width"], model["height"]
+        check_cx, check_cy = model["cx"], model["cy"]
+        crop = message.get("softwareCrop") or {}
+        if "sourceWidth" in crop or "sourceHeight" in crop:
+            check_width, check_height = int(crop["sourceWidth"]), int(crop["sourceHeight"])
+            left, top = int(crop["left"]), int(crop["top"])
+            right, bottom = int(crop["right"]), int(crop["bottom"])
+            if not (
+                0 < check_width <= 65535 and 0 < check_height <= 65535
+                and min(left, top, right, bottom) >= 0
+                and left + model["width"] + right == check_width
+                and top + model["height"] + bottom == check_height
+                and int(crop["width"]) == model["width"]
+                and int(crop["height"]) == model["height"]
+            ):
+                raise ValueError("Camera2 software crop metadata is inconsistent")
+            check_cx += left
+            check_cy += top
+        maximum = max(check_width, check_height)
         if not (
-            0.1 * maximum <= model["fx"] <= 10.0 * maximum
+            model["width"] > 0 and model["height"] > 0
+            and 0.1 * maximum <= model["fx"] <= 10.0 * maximum
             and 0.1 * maximum <= model["fy"] <= 10.0 * maximum
-            and -model["width"] <= model["cx"] <= 2.0 * model["width"]
-            and -model["height"] <= model["cy"] <= 2.0 * model["height"]
+            and -check_width <= check_cx <= 2.0 * check_width
+            and -check_height <= check_cy <= 2.0 * check_height
         ):
             raise ValueError("Camera2 intrinsics failed sanity checks")
         with self._lock:
+            def stable(value):
+                return {**{k: v for k, v in value.items() if k not in ("loadedFrom", "metadata")},
+                        "metadata": {k: v for k, v in value.get("metadata", {}).items() if k != "timestampNs"}}
+            unchanged = (stable(self._source_camera_model) == stable(model) and self._packet_rotation == packet_rotation)
+            retry_cache = bool(self._intrinsics_cache_error)
             self._source_camera_model = model
             self._packet_rotation = packet_rotation
             self._intrinsics_cache_error = ""
             if self._raw_width <= 0 or self._raw_height <= 0:
                 self._raw_width, self._raw_height = model["width"], model["height"]
-        self._save_cached_intrinsics(model)
+        # Heartbeats must not repeatedly rewrite the same cache on the receiver.
+        if not unchanged or retry_cache:
+            self._save_cached_intrinsics(model)
 
     def _cache_path(self) -> Path | None:
         return Path(self.config.intrinsics_cache_path) if self.config.intrinsics_cache_path else None
@@ -501,6 +606,8 @@ class UdpYuvCamera:
 
     def release(self) -> None:
         self._stop.set()
+        if getattr(self, "_h264_receiver", None) is not None:
+            self._h264_receiver.close()
         with self._frame_condition:
             self._frame_condition.notify_all()
         try:
@@ -569,6 +676,8 @@ class WindowsCamera:
     an unbounded queue and never a growing end-to-end delay.
     """
 
+    supports_video_archive = True
+
     def __init__(self, config: WindowsCameraConfig) -> None:
         self.config = config
         self._lock = threading.Lock()
@@ -636,10 +745,10 @@ class WindowsCamera:
             )
 
     def read_latest(self, after_seq: int = -1, timeout_s: float = 0.25):
-        deadline = time.monotonic() + timeout_s
+        deadline = runtime_clock.monotonic() + timeout_s
         with self._frame_condition:
             while True:
-                now = time.monotonic()
+                now = runtime_clock.monotonic()
                 live = (
                     self._latest_frame is not None
                     and now - self._last_frame_at <= self.config.frame_stale_after_s
@@ -719,7 +828,7 @@ class WindowsCamera:
         }
 
     def reported_mode(self) -> dict:
-        now = time.monotonic()
+        now = runtime_clock.monotonic()
         with self._lock:
             live = (
                 self._latest_frame is not None
@@ -771,8 +880,13 @@ class WindowsCamera:
                 if self._stop.wait(0.01):
                     break
                 continue
-            monotonic_now = time.monotonic()
+            monotonic_now = runtime_clock.monotonic()
             raw_height, raw_width = frame.shape[:2]
+            archive = getattr(self, "video_archive", None)
+            if archive is not None:
+                archive.submit("windows_bgr", {"pc_capture_ms": monotonic_now * 1000,
+                               "shape": list(frame.shape), "dtype": str(frame.dtype),
+                               "sequence": self._latest_seq + 1}, frame.tobytes())
             frame = self._preprocess(frame)
             with self._frame_condition:
                 if self._latest_frame is not None and self._latest_seq != self._last_delivered_seq:
