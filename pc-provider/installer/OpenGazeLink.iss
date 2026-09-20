@@ -1,5 +1,7 @@
 #define MyAppName "OpenGazeLink"
-#define MyAppVersion "0.1.0"
+#ifndef MyAppVersion
+#define MyAppVersion "0.2.0"
+#endif
 #define MyAppPublisher "OpenGazeLink"
 #define MyAppExeName "OpenGazeLink.exe"
 

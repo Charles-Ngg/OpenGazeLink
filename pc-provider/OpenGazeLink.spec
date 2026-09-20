@@ -35,6 +35,7 @@ a = Analysis(
             "event_temporal.py", "saccade_prediction.py", "stability_profile.py", "event_evaluation.py", "spatial_metrics.py", "head_coverage.py",
             "unified_prediction.py", "unified_prediction_training.py", "unified_capture.py", "unified_calibration_training.py", "calibration_split.py", "latency.py", "runtime_clock.py", "runtime_diagnostics.py", "runtime_scheduling.py", "transport_clock.py")],
         (str(root.parent / "NOTICE"), "."),
+        (str(root.parent / "MODEL_NOTICE"), "."),
         (str(root.parent / "LICENSE"), "."),
         (str(root / "launcher" / "OpenGazeLink-Control.cmd"), "."),
         (str(root / "launcher" / "OpenGazeLink-Runtime.cmd"), "."),

@@ -8,9 +8,6 @@ import sys
 import time
 from . import runtime_clock
 
-from .config import DEFAULT_CONFIG_PATH
-from .paths import ensure_user_layout
-from .logging_utils import configure_logging
 from .single_instance import CommandServer, SingleInstance, send_command
 
 
@@ -31,17 +28,37 @@ def _send_existing(command: dict) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description="OpenGazeLink production PC provider")
     parser.add_argument(
-        "mode", choices=("control", "runtime", "stop", "status", "train-video"),
+        "mode", choices=("control", "runtime", "stop", "status", "train-video", "self-check"),
         nargs="?", default="control",
     )
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
+    parser.add_argument("--config", type=Path)
     parser.add_argument("--no-open", action="store_true")
     parser.add_argument("--migrate-from", type=Path)
     parser.add_argument("--session", type=Path, help="Saved continuous VIDEO session for offline training")
     parser.add_argument("--base", type=Path, help="Binocular model metadata for VIDEO training")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--no-publish", action="store_true")
+    parser.add_argument("--report", type=Path, help="JSON report for isolated self-check")
     args = parser.parse_args()
+
+    if args.mode == "self-check":
+        if args.report is None:
+            parser.error("self-check requires --report")
+        import os
+        import tempfile
+        # Set the data root before importing any module that resolves user paths.
+        # Never join the running application's mutex, pipe or shared-memory slot.
+        with tempfile.TemporaryDirectory(prefix="opengazelink-check-user-") as directory:
+            os.environ["OPENGAZELINK_USER_DIR"] = directory
+            from .release_check import run
+            result = run(args.report.resolve())
+        raise SystemExit(result)
+
+    from .config import DEFAULT_CONFIG_PATH
+    from .paths import ensure_user_layout
+    from .logging_utils import configure_logging
+    if args.config is None:
+        args.config = DEFAULT_CONFIG_PATH
 
     ensure_user_layout(args.migrate_from)
     logger = configure_logging()

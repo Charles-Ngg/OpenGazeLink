@@ -244,6 +244,19 @@ The script produces a PyInstaller `onedir` directory and portable ZIP. If Inno
 Setup 6 or 7 is installed, it also builds the installer. Release packages do not
 contain personal calibration data.
 
+Before archiving, the build runs the frozen application's `self-check` command:
+base-model loading, one optimizer step, TorchScript export/reload, MediaPipe,
+H.264 decoder and a fresh local control server. It uses temporary user data and
+loopback ports, without contacting the running application. To repeat it from
+an extracted package:
+
+```powershell
+./OpenGazeLink.exe self-check --report "$env:TEMP/opengazelink-self-check.json"
+```
+
+The JSON report records success or the failing dependency. This automated check
+does not measure personal gaze accuracy or replace a live calibration trial.
+
 ### Base model assets
 
 The bundled `face_landmarker.task` is the Apache-2.0 MediaPipe
@@ -258,7 +271,13 @@ release assets, excluded from Git along with personal weights. Put the pair in
 `pc-provider/models/public-conditioned/`, or set `OPENGAZELINK_PUBLIC_MODEL_DIR`
 to a directory containing both files before training or building. Use a trusted
 maintainer-supplied pair; an arbitrary PyTorch checkpoint is not compatible.
-There is currently no automatic download for these assets.
+The v0.2.0 Release includes `OpenGazeLink-base-model-0.2.0.zip` for source users;
+the Windows packages already contain this pair. There is no automatic download.
+
+The bundled base model was trained on MPIIFaceGaze. Its weights and normalization
+metadata are distributed under **CC BY-NC-SA 4.0 for non-commercial scientific
+use**; they are not covered by the source code's Apache-2.0 license. See
+[MODEL_NOTICE](MODEL_NOTICE) for attribution, training provenance and terms.
 
 The Windows build fails with an explicit prerequisite error if the pair is
 missing. It no longer takes model files implicitly from a dated experiment
@@ -336,10 +355,10 @@ trained personal weights, machine-specific scripts, one-off parameter sweeps,
 benchmark outputs and agent working notes local. The tools directory uses an
 explicit publication allowlist. Build artifacts belong in GitHub Releases.
 
-Prepare each update on a branch and review it through a pull request. This source
-update is not a newly published binary release. Before tagging it, set matching
-PC installer/archive versions, publish the required base-model provenance and
-complete a clean-install/upgrade smoke test on both capture routes. Prefer a
+Prepare each update on a branch and review it through a pull request. Before
+tagging, set matching PC installer/archive versions, include the required
+base-model provenance and complete a clean-install/upgrade smoke test on both
+capture routes. Prefer a
 single squash merge for a consolidated release branch so `main` records the
 delivered behavior rather than local experimental iterations.
 
