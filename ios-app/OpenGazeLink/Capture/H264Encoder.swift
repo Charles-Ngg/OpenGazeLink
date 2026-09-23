@@ -141,7 +141,10 @@ final class H264Encoder {
         let presentationTime = CMTime(value: CMTimeValue(presentationTimeNs), timescale: 1_000_000_000)
         let duration = CMTime(value: 1, timescale: CMTimeScale(fps))
 
-        let status = VTCompressionSessionEncodeFrameWithOutputHandler(
+        // `VTCompressionSessionEncodeFrame` has two overloads; this is the one
+        // that takes an output handler (iOS 9+). The
+        // `...EncodeFrameWithOutputHandler` spelling is not available on iOS.
+        let status = VTCompressionSessionEncodeFrame(
             session,
             imageBuffer: pixelBuffer,
             presentationTimeStamp: presentationTime,
