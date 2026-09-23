@@ -88,7 +88,7 @@ final class AvcTcpSender {
 
         guard AvcTcpSender.connect(fd, to: address, timeout: connectTimeoutSeconds) == 0 else {
             let code = errno
-            close(fd)
+            Darwin.close(fd)
             throw Failure.connect(code)
         }
 
@@ -145,9 +145,10 @@ final class AvcTcpSender {
         condition.unlock()
         // shutdown() releases the blocked send() before the descriptor is
         // recycled, which is what lets close() be called from the capture
-        // callback without racing the send thread.
+        // callback without racing the send thread. `Darwin.close` is spelled out
+        // because this type has its own close().
         shutdown(fileDescriptor, SHUT_RDWR)
-        close(fileDescriptor)
+        Darwin.close(fileDescriptor)
         sendThread = nil
     }
 
@@ -190,7 +191,7 @@ final class AvcTcpSender {
                 condition.unlock()
                 if !alreadyClosed {
                     shutdown(fileDescriptor, SHUT_RDWR)
-                    close(fileDescriptor)
+                    Darwin.close(fileDescriptor)
                     onError?(Failure.write(code))
                 }
                 return

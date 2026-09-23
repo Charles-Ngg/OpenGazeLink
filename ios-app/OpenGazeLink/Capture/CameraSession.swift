@@ -272,9 +272,9 @@ final class CameraSession {
             // Low-light boost lengthens exposure, which fights a 120 FPS target.
             device.automaticallyEnablesLowLightBoostWhenAvailable = false
         }
-        if device.isSubjectAreaChangeMonitoringSupported {
-            device.isSubjectAreaChangeMonitoringEnabled = false
-        }
+        // Subject-area change monitoring is not needed and would add
+        // reconfiguration churn; it is always settable while locked.
+        device.isSubjectAreaChangeMonitoringEnabled = false
         // Nothing between here and the matching unlock may throw, so the lock
         // cannot be leaked.
         device.unlockForConfiguration()
