@@ -1,0 +1,206 @@
+name: iOS app
+
+# Path filtered on purpose: the PC test suite runs on every push, and this job
+# needs a macOS runner, so it should only run when the iOS app actually changes.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ios-app/**"
+      - ".github/workflows/ios-build.yml"
+  pull_request:
+    paths:
+      - "ios-app/**"
+      - ".github/workflows/ios-build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # Fast, dependency-free, and the only check that can catch Swift/PC protocol
+  # drift before the macOS build even starts.
+  wire-contract:
+    name: Wire contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check the Swift wire format against the PC provider
+        run: python3 ios-app/Tools/check_wire_contract.py .
+
+  build:
+    name: Build unsigned IPA
+    needs: wire-contract
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          if [ -d /Applications/Xcode_16.2.app ]; then
+            sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
+          else
+            newest="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+            echo "Xcode_16.2.app is not on this runner image; using ${newest}"
+            sudo xcode-select -s "${newest}/Contents/Developer"
+          fi
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        env:
+          HOMEBREW_NO_REQUIRE_TAP_TRUST: "1"
+        run: |
+          brew install xcodegen
+          xcodegen version
+
+      - name: Generate, test, build, and package
+        working-directory: ios-app
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          {
+            echo "== Toolchain =="
+            sw_vers
+            xcode-select -p
+            xcodebuild -version
+            xcodegen version
+
+            echo "== Generate project =="
+            xcodegen generate
+
+            echo "== Static bundle contract checks =="
+            grep -q 'NSCameraUsageDescription' OpenGazeLink/Info.plist
+            grep -q 'NSLocalNetworkUsageDescription' OpenGazeLink/Info.plist
+            grep -q 'UILaunchScreen' OpenGazeLink/Info.plist
+            grep -q 'com.apple.developer.networking.multicast' OpenGazeLink/OpenGazeLink.entitlements
+            # The entitlement must stay commented out: an unsigned sideload
+            # cannot carry it, and a profile without the capability fails to
+            # sign. Enabling it is a deliberate, documented user action.
+            if grep -qE '<key>com\.apple\.developer\.networking\.multicast</key>' OpenGazeLink/OpenGazeLink.entitlements; then
+              echo "multicast entitlement must stay commented out by default" >&2
+              exit 1
+            fi
+            # The deployment target must stay at the RotationCoordinator floor.
+            grep -q 'IPHONEOS_DEPLOYMENT_TARGET: "17.0"' project.yml
+
+            echo "== Unit tests =="
+            sim_udid="$(xcrun simctl list devices available \
+              | sed -n 's/^ *iPhone[^(]*(\([0-9A-F-]\{36\}\)) (.*/\1/p' | head -1)"
+            if [ -z "${sim_udid}" ]; then
+              echo "no available iPhone simulator on this runner" >&2
+              xcrun simctl list devices available >&2
+              exit 1
+            fi
+            echo "Using simulator ${sim_udid}"
+            xcodebuild test \
+              -project OpenGazeLink.xcodeproj \
+              -scheme OpenGazeLink \
+              -destination "id=${sim_udid}" \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO
+
+            echo "== Unsigned iPhoneOS Release build =="
+            xcodebuild build \
+              -project OpenGazeLink.xcodeproj \
+              -scheme OpenGazeLink \
+              -sdk iphoneos \
+              -configuration Release \
+              -derivedDataPath build \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY=""
+
+            release_app="build/Build/Products/Release-iphoneos/OpenGazeLink.app"
+            test -d "${release_app}"
+
+            echo "== Package unsigned Release IPA =="
+            rm -rf package
+            mkdir -p package/Payload
+            cp -R "${release_app}" package/Payload/OpenGazeLink.app
+            /usr/bin/ditto -c -k --sequesterRsrc --keepParent \
+              package/Payload artifacts/OpenGazeLink-unsigned.ipa
+            /usr/bin/unzip -l artifacts/OpenGazeLink-unsigned.ipa
+
+            echo "== Unsigned iPhoneOS Debug build =="
+            xcodebuild build \
+              -project OpenGazeLink.xcodeproj \
+              -scheme OpenGazeLink \
+              -sdk iphoneos \
+              -configuration Debug \
+              -derivedDataPath build-debug \
+              CODE_SIGNING_ALLOWED=NO \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGN_IDENTITY=""
+
+            debug_app="build-debug/Build/Products/Debug-iphoneos/OpenGazeLink.app"
+            test -d "${debug_app}"
+
+            echo "== Package unsigned Debug IPA =="
+            rm -rf package-debug
+            mkdir -p package-debug/Payload
+            cp -R "${debug_app}" package-debug/Payload/OpenGazeLink.app
+            /usr/bin/ditto -c -k --sequesterRsrc --keepParent \
+              package-debug/Payload artifacts/OpenGazeLink-debug.ipa
+            /usr/bin/unzip -l artifacts/OpenGazeLink-debug.ipa
+          } 2>&1 | tee artifacts/build.log
+
+      - name: Upload build log (retained 1 day)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenGazeLink-ios-build-log
+          path: ios-app/artifacts/build.log
+          if-no-files-found: warn
+          retention-days: 1
+
+      # Short-lived artifact for PR validation. Never a release: CI success only
+      # proves the source compiles and packages, not that the camera pipeline
+      # works. See ios-app/README.md for the device test matrix.
+      - name: Upload IPAs as a short-lived artifact (pull request only)
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenGazeLink-ios-unsigned
+          path: |
+            ios-app/artifacts/OpenGazeLink-unsigned.ipa
+            ios-app/artifacts/OpenGazeLink-debug.ipa
+          if-no-files-found: warn
+          retention-days: 3
+
+      - name: Publish IPAs to a GitHub Release
+        if: ${{ github.event_name != 'pull_request' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd ios-app
+          test -f artifacts/OpenGazeLink-unsigned.ipa
+          test -f artifacts/OpenGazeLink-debug.ipa
+
+          ref_name="${GITHUB_REF_NAME}"
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            ref_name="${GITHUB_SHA::8}"
+          fi
+          tag="ios-${ref_name}-${GITHUB_RUN_ID}"
+          title="OpenGazeLink iOS build ${ref_name} (run ${GITHUB_RUN_ID})"
+
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            gh release upload "${tag}" \
+              artifacts/OpenGazeLink-unsigned.ipa \
+              artifacts/OpenGazeLink-debug.ipa \
+              --clobber
+          else
+            gh release create "${tag}" \
+              artifacts/OpenGazeLink-unsigned.ipa \
+              artifacts/OpenGazeLink-debug.ipa \
+              --title "${title}" \
+              --notes "Unsigned OpenGazeLink iOS builds (Release + Debug) for sideloading. Built from $(git rev-parse --short HEAD). The build log is an Actions artifact retained for one day."
+          fi
+          echo "Release tag: ${tag}"

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	Broadcast discovery (255.255.255.255 and subnet-directed broadcast) needs
+	Apple's Multicast Networking entitlement. Uncomment the key below only when
+	the signing profile also carries the capability, otherwise signing fails:
+
+	    <key>com.apple.developer.networking.multicast</key>
+	    <true/>
+
+	Without it the app still pairs: PairingService falls back to unicast
+	discovery, which sends the same JSON payload straight to candidate LAN
+	addresses. Free-account sideloading (LiveContainer/SideStore/Sideloadly)
+	does not grant this capability, so treat manual IP entry as the primary
+	path on a free account. See ios-app/README.md.
+	-->
+</dict>
+</plist>
