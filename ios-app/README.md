@@ -308,15 +308,20 @@ observed from the phone; the PC control centre reports those.
 
 | check | where | status |
 |---|---|---|
-| Swift/PC byte layout, magic numbers, struct sizes, geometry gate | `Tools/check_wire_contract.py` | runs on Linux, passes locally and in CI |
-| Swift unit tests (wire vectors, crop math, option selection, Annex-B, intrinsics validator) | `OpenGazeLinkTests` | runs on the CI simulator |
-| source compiles, unsigned IPA packages | CI macOS runner | runs in CI |
+| Swift/PC byte layout, magic numbers, struct sizes, geometry gate | `Tools/check_wire_contract.py` | **passes**: 31 checks, locally and in CI |
+| Swift unit tests (wire vectors, crop math, option selection, Annex-B, intrinsics validator, rotation, subnet arithmetic) | `OpenGazeLinkTests` | **passes**: 85 tests, 0 failures, on the CI simulator |
+| source compiles for `iphoneos` arm64, deployment target 17.0 | CI macOS runner, Xcode 16.2 | **passes** |
+| unsigned Release and Debug IPAs package and publish | CI macOS runner | **passes** |
 | camera formats actually advertised by the device | **device only** | must be measured |
 | whether the front camera exposes 1080p120 through `videoSupportedFrameRateRanges` | **device only** | must be measured |
 | H.264 hardware encoder throughput at the selected rate | **device only** | must be measured |
 | `videoFieldOfView` reference axis | **device only** | must be verified |
 | end-to-end pairing with the Windows provider | **device + PC** | must be verified |
 | gaze accuracy after recalibration | **device + PC** | must be verified |
+
+Compiling and passing unit tests proves the protocol and the capture-option logic
+are correct. It says nothing about whether the camera pipeline runs, which is
+what the device checklist below is for.
 
 ### Device test checklist
 
