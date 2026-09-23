@@ -32,7 +32,28 @@ final class SupportingLogicTests: XCTestCase {
     // MARK: - LocalNetwork
 
     private func interface(_ name: String, _ address: String, _ netmask: String) -> LocalNetwork.Interface {
-        LocalNetwork.Interface(name: name, address: address, netmask: netmask, broadcast: "")
+        // Derive the broadcast the same way interfaces() does, so the tests
+        // exercise the real subnet arithmetic instead of a hard-coded string.
+        LocalNetwork.Interface(
+            name: name,
+            address: address,
+            netmask: netmask,
+            broadcast: LocalNetwork.directedBroadcast(address: address, netmask: netmask) ?? ""
+        )
+    }
+
+    func testDirectedBroadcastArithmetic() {
+        XCTAssertEqual(LocalNetwork.directedBroadcast(address: "192.168.50.222", netmask: "255.255.255.0"),
+                       "192.168.50.255")
+        XCTAssertEqual(LocalNetwork.directedBroadcast(address: "172.20.10.1", netmask: "255.255.255.240"),
+                       "172.20.10.15")
+        XCTAssertEqual(LocalNetwork.directedBroadcast(address: "10.5.7.9", netmask: "255.255.0.0"),
+                       "10.5.255.255")
+        // A /32 has no broadcast address; it comes back as the host itself and
+        // is filtered out by broadcastAddresses().
+        XCTAssertEqual(LocalNetwork.directedBroadcast(address: "10.0.0.5", netmask: "255.255.255.255"),
+                       "10.0.0.5")
+        XCTAssertNil(LocalNetwork.directedBroadcast(address: "nonsense", netmask: "255.255.255.0"))
     }
 
     func testSweepCoversTheTwentyFourBitSliceExactlyOnce() {

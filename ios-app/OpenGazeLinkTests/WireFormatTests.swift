@@ -52,9 +52,11 @@ final class WireFormatTests: XCTestCase {
     func testIntrinsicsEnvelopeLayoutMatchesPCStruct() {
         let bytes = WireFormat.intrinsicsEnvelope(json: [UInt8](repeating: 0x41, count: 9))
         let expected: [UInt8] = [0x45, 0x59, 0x43, 0x49, 0x01, 0x00, 0x0C, 0x00, 0x09, 0x00, 0x00, 0x00]
-        XCTAssertEqual(bytes.count, 12)
+        // The envelope is a 12-byte header followed by the JSON payload.
         XCTAssertEqual(Array(bytes[0..<12]), expected)
         XCTAssertEqual(bytes.count, WireFormat.intrinsicsHeaderSize + 9)
+        // camera.py:507 reads the payload size from the header, not the length.
+        XCTAssertEqual(UInt32(bytes[8]) | (UInt32(bytes[9]) << 8) | (UInt32(bytes[10]) << 16) | (UInt32(bytes[11]) << 24), 9)
     }
 
     // MARK: - TCP AVC header, h264_stream.py AVC_HEADER = struct.Struct('<4sIIHHQQQI')

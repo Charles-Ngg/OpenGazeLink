@@ -47,16 +47,11 @@ enum LocalNetwork {
             }
             guard let mask = string(from: netmask.sin_addr) else { continue }
 
-            let ipValue = UInt32(bigEndian: address.sin_addr.s_addr)
-            let maskValue = UInt32(bigEndian: netmask.sin_addr.s_addr)
-            let broadcastValue = (ipValue & maskValue) | ~maskValue
-            var broadcastAddress = in_addr(s_addr: broadcastValue.bigEndian)
-
             result.append(Interface(
                 name: String(cString: current.pointee.ifa_name),
                 address: ip,
                 netmask: mask,
-                broadcast: string(from: broadcastAddress) ?? "255.255.255.255"
+                broadcast: directedBroadcast(address: ip, netmask: mask) ?? "255.255.255.255"
             ))
         }
         // en0 (Wi-Fi) first: it is the interface the PC provider is normally on.
@@ -64,6 +59,15 @@ enum LocalNetwork {
             if (lhs.name == "en0") != (rhs.name == "en0") { return lhs.name == "en0" }
             return lhs.name < rhs.name
         }
+    }
+
+    /// Directed broadcast address for one interface, e.g. 192.168.50.255 for
+    /// 192.168.50.222/255.255.255.0. Extracted so the arithmetic is unit-tested
+    /// rather than only exercised through `getifaddrs`.
+    static func directedBroadcast(address: String, netmask: String) -> String? {
+        guard let ip = ipv4Value(address), let mask = ipv4Value(netmask) else { return nil }
+        var value = in_addr(s_addr: ((ip & mask) | ~mask).bigEndian)
+        return string(from: value)
     }
 
     /// Directed broadcast addresses, deduplicated and excluding the limited

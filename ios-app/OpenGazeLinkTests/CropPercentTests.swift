@@ -87,7 +87,11 @@ final class CropPercentTests: XCTestCase {
     func testCropValidationReportsTheFirstFailure() {
         XCTAssertNotNil(PixelCrop(x: -1, y: 0, width: 100, height: 100).validationFailure(frameWidth: 200, frameHeight: 200))
         XCTAssertNotNil(PixelCrop(x: 0, y: 0, width: 101, height: 100).validationFailure(frameWidth: 200, frameHeight: 200))
-        XCTAssertNotNil(PixelCrop(x: 0, y: 0, width: 200, height: 200).validationFailure(frameWidth: 200, frameHeight: 200))
+        // Exceeds the frame on the right and the bottom.
+        XCTAssertNotNil(PixelCrop(x: 0, y: 0, width: 202, height: 200).validationFailure(frameWidth: 200, frameHeight: 200))
+        XCTAssertNotNil(PixelCrop(x: 0, y: 0, width: 2, height: 100).validationFailure(frameWidth: 200, frameHeight: 200))
+        // A full-frame crop is valid: it is what High-speed mode always sends.
+        XCTAssertNil(PixelCrop(x: 0, y: 0, width: 200, height: 200).validationFailure(frameWidth: 200, frameHeight: 200))
         XCTAssertNil(PixelCrop(x: 0, y: 0, width: 100, height: 100).validationFailure(frameWidth: 200, frameHeight: 200))
     }
 
