@@ -80,11 +80,15 @@ jobs:
             grep -q 'NSLocalNetworkUsageDescription' OpenGazeLink/Info.plist
             grep -q 'UILaunchScreen' OpenGazeLink/Info.plist
             grep -q 'com.apple.developer.networking.multicast' OpenGazeLink/OpenGazeLink.entitlements
-            # The entitlement must stay commented out: an unsigned sideload
-            # cannot carry it, and a profile without the capability fails to
-            # sign. Enabling it is a deliberate, documented user action.
-            if grep -qE '<key>com\.apple\.developer\.networking\.multicast</key>' OpenGazeLink/OpenGazeLink.entitlements; then
-              echo "multicast entitlement must stay commented out by default" >&2
+            # The key must be documented in the file but must NOT be an active
+            # entitlement: an unsigned sideload cannot carry it, and a profile
+            # without the capability fails to sign. plutil is used rather than a
+            # text grep so the explanatory XML comment does not match.
+            if /usr/bin/plutil -convert json -o - OpenGazeLink/OpenGazeLink.entitlements \
+                 | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(1 if 'com.apple.developer.networking.multicast' in d else 0)"; then
+              echo "multicast entitlement is disabled by default: OK"
+            else
+              echo "multicast entitlement must stay disabled by default" >&2
               exit 1
             fi
             # The deployment target must stay at the RotationCoordinator floor.
