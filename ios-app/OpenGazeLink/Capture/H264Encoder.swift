@@ -79,9 +79,13 @@ final class H264Encoder {
         // Same heuristic and clamp as AvcEncoder.format().
         self.bitrate = min(max(width * height * max(1, fps) / 8, 2_000_000), 80_000_000)
 
-        let encoderSpecification: [CFString: Any] = [
-            kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder: true,
-        ]
+        // Hardware-encoder hints. The specification key is only available from
+        // iOS 17.4, so it is added when the running OS supports it; VideoToolbox
+        // already prefers the hardware H.264 encoder when the key is absent.
+        var encoderSpecification: [CFString: Any] = [:]
+        if #available(iOS 17.4, *) {
+            encoderSpecification[kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder] = true
+        }
         let sourceAttributes: [CFString: Any] = [
             kCVPixelBufferPixelFormatTypeKey: Int(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
             kCVPixelBufferWidthKey: width,

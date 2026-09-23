@@ -67,7 +67,7 @@ final class UdpSender {
 
         guard SocketSupport.connect(fd, to: address) == 0 else {
             let code = errno
-            close(fd)
+            Darwin.close(fd)
             throw Failure.socket(code)
         }
 
@@ -159,8 +159,9 @@ final class UdpSender {
         lock.unlock()
         // shutdown() releases the blocked recv() before the descriptor goes
         // away; closing first would leave the reply thread reading a recycled fd.
+        // `Darwin.close` is spelled out because this type has its own close().
         shutdown(fileDescriptor, SHUT_RDWR)
-        close(fileDescriptor)
+        Darwin.close(fileDescriptor)
         replyThread = nil
     }
 

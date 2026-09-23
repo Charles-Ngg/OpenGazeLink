@@ -72,6 +72,22 @@ jobs:
             xcodebuild -version
             xcodegen version
 
+            echo "== VideoToolbox Swift interface probe (temporary) =="
+            cat > /tmp/probe.swift <<'SWIFT'
+          import VideoToolbox
+          import CoreMedia
+          let a: Int = VTCompressionSessionEncodeFrameWithOutputHandler
+          let b: Int = VTCompressionSessionEncodeFrame
+          let c: Int = VTCompressionSessionCreate
+          let d: Int = VTSessionSetProperty
+          let e: Int = VTCompressionSessionCompleteFrames
+          let f: Int = kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder
+          let g: Int = kVTCompressionPropertyKey_MaxFrameDelayCount
+          let h: Int = kVTVideoEncoderSpecification_EnableLowLatencyRateControl
+          SWIFT
+            xcrun swiftc -typecheck -sdk "$(xcrun --sdk iphoneos --show-sdk-path)" \
+              -target arm64-apple-ios17.0 /tmp/probe.swift 2>&1 || true
+
             echo "== Generate project =="
             xcodegen generate
 
